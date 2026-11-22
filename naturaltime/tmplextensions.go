@@ -1,3 +1,5 @@
+// todo: make it read years (2027, etc) and check if the input is a unix timestamp
+
 package naturaltime
 
 import (
@@ -19,9 +21,6 @@ var timezonesJSON []byte
 
 // tzOffsets maps timezone abbreviations (uppercased) to their UTC offset in minutes.
 var tzOffsets map[string]int
-
-// defaultLocation is used when no timezone is found in the input string.
-var defaultLocation *time.Location
 
 // utcOffsetPattern matches explicit UTC/GMT offset expressions.
 // e.g. "UTC+1", "GMT-5", "UTC+5:30", "gmt-3:30"
@@ -60,14 +59,6 @@ func init() {
 		}
 	}
 
-	// Build the default location from the EDT entry in the map.
-	// This is used when no timezone is found in the input string.
-	if edtOffset, ok := tzOffsets["EDT"]; ok {
-		defaultLocation = time.FixedZone("EDT", edtOffset*60)
-	} else {
-		defaultLocation = time.UTC // last-resort safety net
-	}
-
 	templates.RegisterSetupFunc(func(ctx *templates.Context) {
 		ctx.ContextFuncs["parseNaturalTime"] = tmplParseNaturalTime(ctx)
 	})
@@ -77,8 +68,9 @@ func init() {
 // It checks for UTC/GMT offset expressions first (e.g. "UTC+1", "GMT-5:30"),
 // then scans whitespace-separated tokens against the known abbreviations map
 // (e.g. "EDT", "CEST").
-// Returns the resolved location and the input string with the timezone removed.
-func parseTimezone(input string) (*time.Location, string) {
+// Returns the resolved location, the input string with the timezone removed,
+// and whether a timezone was found.
+func parseTimezone(input string) (*time.Location, string, bool) {
 	// Check for UTC+N / GMT-N style offsets first.
 	if m := utcOffsetPattern.FindStringSubmatchIndex(input); m != nil {
 		full := input[m[0]:m[1]]
@@ -98,7 +90,7 @@ func parseTimezone(input string) (*time.Location, string) {
 
 		loc := time.FixedZone(full, offsetMinutes*60)
 		cleaned := strings.TrimSpace(utcOffsetPattern.ReplaceAllString(input, ""))
-		return loc, cleaned
+		return loc, cleaned, true
 	}
 
 	// Scan whitespace-separated tokens for a known timezone abbreviation.
@@ -107,16 +99,16 @@ func parseTimezone(input string) (*time.Location, string) {
 		if offsetMinutes, ok := tzOffsets[upper]; ok {
 			loc := time.FixedZone(upper, offsetMinutes*60)
 			cleaned := strings.TrimSpace(strings.Replace(input, token, "", 1))
-			return loc, cleaned
+			return loc, cleaned, true
 		}
 	}
 
-	return defaultLocation, input
+	return nil, input, false
 }
 
 // tmplParseNaturalTime parses a natural language time string, automatically
 // detecting any timezone abbreviation or UTC/GMT offset in the input.
-// Falls back to EDT if no timezone is found.
+// Returns an error if no timezone is found in the input.
 // Returns a time.Time in UTC.
 //
 // Counts against the template's generic API-call budget (100 calls per execution).
@@ -133,7 +125,10 @@ func tmplParseNaturalTime(ctx *templates.Context) interface{} {
 			return time.Time{}, templates.ErrTooManyAPICalls
 		}
 
-		loc, cleaned := parseTimezone(input)
+		loc, cleaned, foundTZ := parseTimezone(input)
+		if !foundTZ {
+			return time.Time{}, fmt.Errorf("No timezone provided. Could not understand time.")
+		}
 
 		base := time.Now().In(loc)
 		r, err := when.EN.Parse(cleaned, base)
