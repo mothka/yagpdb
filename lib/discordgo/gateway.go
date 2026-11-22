@@ -349,10 +349,7 @@ func (g *GatewayConnectionManager) Open() error {
 
 // initSharding sets the sharding details and verifies that they are valid
 func (g *GatewayConnectionManager) initSharding() {
-	g.shardCount = g.session.ShardCount
-	if g.shardCount < 1 {
-		g.shardCount = 1
-	}
+	g.shardCount = max(g.session.ShardCount, 1)
 
 	g.shardID = g.session.ShardID
 	if g.shardID >= g.shardCount || g.shardID < 0 {
@@ -653,12 +650,16 @@ type GatewayConnection struct {
 	resumeGatewayUrl string
 
 	// This gets closed when the connection closes to signal all workers to stop
-	stopWorkers chan interface{}
+	stopWorkers chan any
 
 	wsReader *wsutil.Reader
 
 	// contains the raw message fragments until we have received them all
 	readMessageBuffer *bytes.Buffer
+
+	// control frames arrive interleaved with the zlib stream and must not be
+	// appended to readMessageBuffer, which would corrupt the stream
+	controlFrameBuffer bytes.Buffer
 
 	zlibReader             io.Reader
 	jsonDecoder            *gojay.Decoder
@@ -681,7 +682,7 @@ type GatewayConnection struct {
 func NewGatewayConnection(parent *GatewayConnectionManager, id int, intents []GatewayIntent) *GatewayConnection {
 	gwc := &GatewayConnection{
 		manager:           parent,
-		stopWorkers:       make(chan interface{}),
+		stopWorkers:       make(chan any),
 		readMessageBuffer: bytes.NewBuffer(make([]byte, 0, 0xffff)), // initial 65k buffer
 		connID:            id,
 		status:            GatewayStatusConnecting,
@@ -1025,6 +1026,12 @@ func (g *GatewayConnection) reader() {
 			return
 		}
 
+		dst := g.readMessageBuffer
+		if header.OpCode.IsControl() {
+			g.controlFrameBuffer.Reset()
+			dst = &g.controlFrameBuffer
+		}
+
 		for readAmount := int64(0); readAmount < header.Length; {
 
 			n, err := g.wsReader.Read(intermediateBuffer)
@@ -1034,8 +1041,7 @@ func (g *GatewayConnection) reader() {
 			}
 
 			if n != 0 {
-				// g.log(LogInformational, base64.URLEncoding.EncodeToString(intermediateBuffer[:n]))
-				g.readMessageBuffer.Write(intermediateBuffer[:n])
+				dst.Write(intermediateBuffer[:n])
 			}
 
 			readAmount += int64(n)
@@ -1049,7 +1055,7 @@ func (g *GatewayConnection) reader() {
 	}
 }
 
-func (g *GatewayConnection) readerError(err error, msgf string, args ...interface{}) {
+func (g *GatewayConnection) readerError(err error, msgf string, args ...any) {
 	// There was an error reading the next frame, close the connection and trigger a reconnect
 	g.mu.Lock()
 	g.conn.Close()
@@ -1073,15 +1079,17 @@ var (
 
 // handleReadFrame handles a copmletely read frame
 func (g *GatewayConnection) handleReadFrame(header ws.Header) {
-	if header.OpCode == ws.OpClose {
-		g.handleCloseFrame(g.readMessageBuffer.Bytes())
-		g.readMessageBuffer.Reset()
+	if header.OpCode.IsControl() {
+		if header.OpCode == ws.OpClose {
+			g.handleCloseFrame(g.controlFrameBuffer.Bytes())
+		} else {
+			g.log(LogError, "Don't know how to respond to websocket frame type: 0x%x", header.OpCode)
+		}
+		g.controlFrameBuffer.Reset()
 		return
 	}
 
-	// TODO: Handle these properly
-	if header.OpCode != ws.OpText && header.OpCode != ws.OpBinary {
-		g.readMessageBuffer.Reset()
+	if header.OpCode != ws.OpText && header.OpCode != ws.OpBinary && header.OpCode != ws.OpContinuation {
 		g.log(LogError, "Don't know how to respond to websocket frame type: 0x%x", header.OpCode)
 		return
 	}
@@ -1105,9 +1113,10 @@ func (g *GatewayConnection) handleReadFrame(header ws.Header) {
 
 // handleCloseFrame handles a close frame
 func (g *GatewayConnection) handleCloseFrame(data []byte) {
-	code := binary.BigEndian.Uint16(data)
+	code := uint16(1005)
 	var msg string
-	if len(data) > 2 {
+	if len(data) >= 2 {
+		code = binary.BigEndian.Uint16(data)
 		msg = string(data[2:])
 	}
 
@@ -1363,6 +1372,7 @@ func (g *GatewayConnection) identify() error {
 		Shard:              nil,
 		GuildSubscriptions: true,
 		Intents:            intents,
+		Capabilities:       GatewayCapabilityChannelObfuscation,
 	}
 
 	if g.manager.shardCount > 1 {
@@ -1420,14 +1430,14 @@ func (g *GatewayConnection) RequestGuildMembers(d *RequestGuildMembersData) {
 	g.writer.Queue(op)
 }
 
-func (g *GatewayConnection) onError(err error, msgf string, args ...interface{}) {
+func (g *GatewayConnection) onError(err error, msgf string, args ...any) {
 	g.log(LogError, "%s: %s", fmt.Sprintf(msgf, args...), err.Error())
 	if err := g.ReconnectUnlessClosed(false); err != nil {
 		g.log(LogError, "Failed reconnecting to the gateway: %v", err)
 	}
 }
 
-func (g *GatewayConnection) log(msgL int, msgf string, args ...interface{}) {
+func (g *GatewayConnection) log(msgL int, msgf string, args ...any) {
 	if GatewayLogger != nil {
 		GatewayLogger(g.manager.shardID, g.connID, msgL, msgf, args...)
 		return
@@ -1442,9 +1452,9 @@ func (g *GatewayConnection) log(msgL int, msgf string, args ...interface{}) {
 }
 
 type outgoingEvent struct {
-	Operation GatewayOP   `json:"op"`
-	Type      string      `json:"t,omitempty"`
-	Data      interface{} `json:"d,omitempty"`
+	Operation GatewayOP `json:"op"`
+	Type      string    `json:"t,omitempty"`
+	Data      any       `json:"d,omitempty"`
 }
 
 type identifyData struct {
@@ -1455,7 +1465,12 @@ type identifyData struct {
 	GuildSubscriptions bool               `json:"guild_subscriptions"`
 	Shard              *[2]int            `json:"shard,omitempty"`
 	Intents            *int               `json:"intents,omitempty"`
+	Capabilities       int                `json:"capabilities,omitempty"`
 }
+
+// GatewayCapabilityChannelObfuscation opts into receiving obfuscated channels the bot cannot view,
+// which discord applies to every bot regardless starting November 16, 2026
+const GatewayCapabilityChannelObfuscation = 1 << 15
 
 type identifyProperties struct {
 	OS              string `json:"$os"`

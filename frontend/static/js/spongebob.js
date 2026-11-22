@@ -61,6 +61,12 @@ function navigate(url, method, data, updateHistory, maintainScroll, alertsOnly, 
 
 	console.log("Navigating to " + url);
 	var shownURL = url;
+	// The fragment never reaches the server, so the partial param has to go before it
+	var hashIndex = url.indexOf("#");
+	if (hashIndex !== -1) {
+		url = url.slice(0, hashIndex);
+	}
+	var shownPath = url;
 	// Add the partial param
 	var index = url.indexOf("?")
 	if (index !== -1) {
@@ -77,7 +83,7 @@ function navigate(url, method, data, updateHistory, maintainScroll, alertsOnly, 
 
 	updateSelectedMenuItem(url);
 
-	var req = new XMLHttpRequest();
+	let req = new XMLHttpRequest();
 	req.addEventListener("load", function () {
 		currentlyLoading = false;
 		if (this.status !== 200 && this.status !== 400) {
@@ -86,18 +92,19 @@ function navigate(url, method, data, updateHistory, maintainScroll, alertsOnly, 
 		} else if (this.status === 400) {
 			alertsOnly = true;
 		}
+		let success = this.status === 200;
 
 		if (updateHistory) {
 			window.history.pushState("", "", shownURL);
 		}
-		lastLoc = shownURL;
+		lastLoc = shownPath;
 		lastHash = window.location.hash;
 
 		if (alertsOnly) {
 			showAlerts(this.responseText)
 			$("#loading-overlay").addClass("hidden");
 			if (cb)
-				cb();
+				cb(success);
 			return
 		}
 
@@ -111,13 +118,13 @@ function navigate(url, method, data, updateHistory, maintainScroll, alertsOnly, 
 			console.log("Sent pageview")
 		}
 
-		if (cb)
-			cb();
-
 		if (maintainScroll)
 			document.documentElement.scrollTop = scrollBeforeNav;
 
 		$("#loading-overlay").addClass("hidden");
+
+		if (cb)
+			cb(success);
 	});
 
 	req.addEventListener("error", function () {
@@ -136,8 +143,10 @@ function navigate(url, method, data, updateHistory, maintainScroll, alertsOnly, 
 	}
 }
 
+var lastAlertsHadError = false;
 function showAlerts(alertsJson) {
 	var alerts = JSON.parse(alertsJson);
+	lastAlertsHadError = !!alerts && alerts.some(function (a) { return a.Style === "danger"; });
 	if (!alerts) return;
 
 	const stack_bar_top = { "dir1": "down", "dir2": "right", "push": "top", "spacing1": 0, "spacing2": 0 };
@@ -268,10 +277,10 @@ function addListeners() {
 
 		if (currentlyLoading) { return; }
 
-		var link = $(this);
-
-		var url = link.attr("href");
-		navigate(url, "GET", null, true);
+		let url = $(this).attr("href");
+		guardUnsavedNavigation(function () {
+			navigate(url, "GET", null, true);
+		});
 	});
 
 	$(document).on("click", '[data-toggle="popover"]', function (evt) {
@@ -310,6 +319,14 @@ function initPlugins(partial) {
 
 	$(selectorPrefix + '[data-toggle="popover"]').popover()
 	$(selectorPrefix + '[data-toggle="tooltip"]').tooltip();
+
+	// On phones the tab row scrolls, so bring the active tab into view.
+	$(selectorPrefix + '.tabs .nav-tabs').each(function () {
+		var active = $(this).find('.nav-link.active')[0];
+		if (!active || this.scrollWidth <= this.clientWidth) return;
+		var row = this.getBoundingClientRect(), tab = active.getBoundingClientRect();
+		this.scrollLeft += (tab.left - row.left) - (row.width - tab.width) / 2;
+	});
 
 	$('.entry:not(:last-of-type) .btn-add')
 		.removeClass('btn-add').addClass('btn-remove')
@@ -491,7 +508,8 @@ function formSubmissionEvents() {
 			action = window.location.pathname;
 		}
 
-		submitForm($(event.target), action, false);
+		var submitter = event.originalEvent && event.originalEvent.submitter;
+		submitForm($(event.target), action, false, submitter);
 	});
 
 	$(document).on("click", 'button', function (event) {
@@ -546,33 +564,78 @@ function formSubmissionEvents() {
 		}
 
 		event.preventDefault();
-		submitForm(parentForm, target.attr("formaction"), alertsOnly);
+		submitForm(parentForm, target.attr("formaction"), alertsOnly, target[0]);
 
 	});
 }
 
-function submitForm(form, url, alertsOnly) {
+function submitForm(form, url, alertsOnly, button) {
 	var serialized = serializeForm(form);
+	var saveFeedback = prepareSaveFeedback(form, button);
 
 	if (!alertsOnly) {
 		alertsOnly = form.attr("data-async-form-alertsonly") !== undefined;
 	}
 
-	// Keep the current tab selected
+	// Keep the current tab selected.
 	var currentTab = null
 	var tabElements = $(".tabs");
 	if (tabElements.length > 0) {
-		currentTab = $(".tabs a.active").attr("href")
+		var activeHref = $(".tabs a.active").attr("href")
+		if (activeHref && activeHref.charAt(0) === "#") {
+			currentTab = activeHref
+		}
 	}
 
-	navigate(url, "POST", serialized, false, true, alertsOnly, function () {
-		hideUnsavedChangesPopup($(form)[0])
+	navigate(url, "POST", serialized, false, true, alertsOnly, function (success) {
+		markFormClean($(form)[0])
 		if (currentTab) {
 			$(".tabs a[href='" + currentTab + "']").tab("show");
 		}
+		if (saveFeedback) saveFeedback(success);
 	});
 
 	$.magnificPopup.close();
+}
+
+// The page is usually re-rendered after a save, so the clicked button is found again through its
+// form's action and hidden id fields, which identify a row on pages with one form per row.
+function formSignature(form) {
+	var ids = $(form).find("input[type=hidden], input.hidden").map(function () { return this.name + "=" + this.value; }).get();
+	return ($(form).attr("action") || "") + "|" + ids.join("&");
+}
+
+function prepareSaveFeedback(form, button) {
+	if (!button || $(button).hasClass("btn-danger")) return null;
+
+	var signature = formSignature(form);
+	var buttonIndex = $(form).find("button").index(button);
+	lastAlertsHadError = false;
+
+	return function (success) {
+		// Alerts in a re-rendered page are shown from a ready handler, which jQuery runs asynchronously.
+		setTimeout(function () {
+			var target = button;
+			if (!document.body.contains(target)) {
+				var matches = $("#main-content form").filter(function () { return formSignature(this) === signature; });
+				target = matches.length === 1 ? matches.find("button").get(buttonIndex) : null;
+			}
+			if (target) flashSaveResult(target, success && !lastAlertsHadError);
+		}, 50);
+	};
+}
+
+function flashSaveResult(button, ok) {
+	var $button = $(button);
+	if ($button.data("save-flash")) return;
+
+	var iconOnly = $button.text().trim() === "";
+	var original = $button.html();
+	var icon = ok ? "fa-check" : "fa-times";
+	$button.data("save-flash", true).html('<i class="fas ' + icon + '"></i>' + (iconOnly ? "" : (ok ? " Saved" : " Not saved")));
+	setTimeout(function () {
+		$button.html(original).removeData("save-flash");
+	}, 1500);
 }
 
 function serializeForm(form) {
@@ -596,23 +659,15 @@ function yagInitUnsavedForms(selectorPrefix) {
 }
 
 function trackForm(form) {
-	let savedVersion = serializeForm($(form));
+	form._yagSavedVersion = serializeForm($(form));
 
-	let hasUnsavedChanges = false
-
-	$(form).change(function () {
-		console.log("Form changed!");
-		checkForUnsavedChanges();
-	})
-	$(`[form="${form.id}"]`).change(function() {
-		console.log("Form changed!");
-		checkForUnsavedChanges()
-	})
+	$(form).change(checkForUnsavedChanges);
+	$(`[form="${form.id}"]`).change(checkForUnsavedChanges);
 
 	var observer = new MutationObserver(function (mutationList, observer) {
 		if (!document.body.contains(form)) {
 			observer.disconnect();
-			hideUnsavedChangesPopup(form);
+			removeUnsavedForm(form);
 			return;
 		}
 
@@ -623,106 +678,100 @@ function trackForm(form) {
 	observer.observe(document.body, { childList: true, subtree: true });
 
 	function checkForUnsavedChanges() {
-		let newVersion = serializeForm($(form));
-		if (newVersion !== savedVersion) {
-			console.log("Its different!");
-			hasUnsavedChanges = true;
-			showUnsavedChangesPopup(form);
+		if (serializeForm($(form)) !== form._yagSavedVersion) {
+			addUnsavedForm(form);
 		} else {
-			hasUnsavedChanges = false;
-			console.log("It's the same!");
-			hideUnsavedChangesPopup(form);
+			removeUnsavedForm(form);
 		}
 	}
 }
 
 let unsavedChangesStack = [];
 let isSavingUnsavedForms = false;
+let pendingNavigation = null;
 
-function showUnsavedChangesPopup(form) {
-	if (unsavedChangesStack.includes(form)) {
-		return;
-	}
-
-	unsavedChangesStack.push(form)
-	updateUnsavedChangesPopup();
-}
-
-function hideUnsavedChangesPopup(form) {
+function addUnsavedForm(form) {
 	if (!unsavedChangesStack.includes(form)) {
+		unsavedChangesStack.push(form);
+	}
+}
+
+function removeUnsavedForm(form) {
+	let index = unsavedChangesStack.indexOf(form);
+	if (index !== -1) {
+		unsavedChangesStack.splice(index, 1);
+	}
+	if (unsavedChangesStack.length === 0) {
+		$("#unsaved-changes-popup").attr("hidden", true);
+	}
+}
+
+function markFormClean(form) {
+	if (!form) return;
+	form._yagSavedVersion = serializeForm($(form));
+	removeUnsavedForm(form);
+}
+
+window.addEventListener('beforeunload', function (e) {
+	if (unsavedChangesStack.length > 0) {
+		e.preventDefault();
+		e.returnValue = '';
+	}
+});
+
+
+function guardUnsavedNavigation(navFn) {
+	if (unsavedChangesStack.length === 0) {
+		navFn();
 		return;
 	}
 
-	let index = unsavedChangesStack.indexOf(form);
-	unsavedChangesStack.splice(index, 1);
-	updateUnsavedChangesPopup(form)
+	pendingNavigation = navFn;
+	$("#unsaved-changes-message").text("You have unsaved changes, would you like to save them?");
+	$("#unsaved-changes-save-button").attr("hidden", false);
+	$("#unsaved-changes-leave-button").attr("hidden", false);
+	$("#unsaved-changes-popup").attr("hidden", false);
 }
 
-// onbeforeunload
-function unsavedChangesAlert() {
-    if (unsavedChangesStack.length > 0) {
-        return "You have unsaved changes, are you sure you want to leave?";
-    }
+function resolvePendingNavigation() {
+	let nav = pendingNavigation;
+	pendingNavigation = null;
+	if (nav) nav();
 }
 
-function updateUnsavedChangesPopup() {
-	if (unsavedChangesStack.length == 0) {
-		$("#unsaved-changes-popup").attr("hidden", true)
-	} else {
-		if (unsavedChangesStack.length == 1) {
-			$("#unsaved-changes-message").text("You have unsaved changes, would you like to save them?");
-			if (!isSavingUnsavedForms)
-				$("#unsaved-changes-save-button").attr("hidden", false);
-
-		} else {
-			$("#unsaved-changes-message").text("You have unsaved changes on multiple forms, save them all?");
-			if (!isSavingUnsavedForms)
-				$("#unsaved-changes-save-button").attr("hidden", false);
-
-		}
-
-		$("#unsaved-changes-popup").attr("hidden", false)
-	}
+function leaveWithoutSaving() {
+	unsavedChangesStack = [];
+	$("#unsaved-changes-popup").attr("hidden", true);
+	resolvePendingNavigation();
 }
 
 function saveUnsavedChanges() {
-
-	if (unsavedChangesStack.length == 1) {
-		let form = unsavedChangesStack[0];
-		var action = $(form).attr("action");
-		if (!action) {
-			action = window.location.pathname;
-		}
-
-		submitForm($(form), action, false);
-		unsavedChangesStack = [];
-		updateUnsavedChangesPopup();
-	} else {
-		saveNext();
-	}
+	let forms = unsavedChangesStack.slice();
+	$("#unsaved-changes-save-button").attr("hidden", true);
+	$("#unsaved-changes-leave-button").attr("hidden", true);
+	isSavingUnsavedForms = true;
+	saveNext();
 
 	function saveNext() {
-		$("#unsaved-changes-save-button").attr("hidden", true);
-
-		console.log("Saving next");
-		let form = unsavedChangesStack.pop();
-
-		let action = $(form).attr("action");
-		if (!action) {
-			action = window.location.pathname;
+		if (forms.length === 0) {
+			isSavingUnsavedForms = false;
+			$("#unsaved-changes-popup").attr("hidden", true);
+			resolvePendingNavigation();
+			return;
 		}
 
-		let jf = $(form)
-		let serialized = serializeForm(jf);
+		let form = forms.shift();
+		let action = $(form).attr("action") || window.location.pathname;
+		let serialized = serializeForm($(form));
 
-		navigate(action, "POST", serialized, false, true, true, function () {
-			console.log("Doneso!");
-			if (unsavedChangesStack.length > 0) {
-				saveNext();
-			} else {
-				isSaving = false;
-				updateUnsavedChangesPopup();
+		navigate(action, "POST", serialized, false, true, true, function (success) {
+			if (!success) {
+				isSavingUnsavedForms = false;
+				pendingNavigation = null;
+				return;
 			}
+			markFormClean(form);
+			saveNext();
 		});
 
 		$.magnificPopup.close();

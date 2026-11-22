@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/botlabs-gg/yagpdb/v2/bot"
 	"github.com/botlabs-gg/yagpdb/v2/common"
@@ -29,7 +30,7 @@ var (
 	ErrRegexCacheLimit = errors.New("too many unique regular expressions (regex)")
 )
 
-func (c *Context) parseMessageInput(msg interface{}) (*discordgo.MessageSend, error) {
+func (c *Context) parseMessageInput(msg any) (*discordgo.MessageSend, error) {
 	msgSend := &discordgo.MessageSend{
 		AllowedMentions: discordgo.AllowedMentions{
 			Parse: []discordgo.AllowedMentionType{discordgo.AllowedMentionTypeUsers},
@@ -71,28 +72,28 @@ func (c *Context) parseMessageInput(msg interface{}) (*discordgo.MessageSend, er
 	return msgSend, nil
 }
 
-func (c *Context) tmplSendDM(s ...interface{}) string {
+func (c *Context) tmplSendDM(s ...any) (string, error) {
 	if len(s) < 1 || c.IncreaseCheckCallCounter("send_dm", 1) || c.IncreaseCheckGenericAPICall() || c.MS == nil || c.ExecutedFrom == ExecutedFromLeave {
-		return ""
+		return "", nil
 	}
 
 	msgSend, err := c.parseMessageInput(s[0])
 	if err != nil {
-		return ""
+		return "", nil
 	}
 
 	if (len(msgSend.Embeds) == 0 && strings.TrimSpace(msgSend.Content) == "") && (msgSend.File == nil) && (len(msgSend.Components) == 0) {
-		return ""
+		return "", nil
 	}
 
-	if msgSend.Content != "" && reflect.TypeOf(s[0]).Kind() != reflect.Ptr && reflect.TypeOf(s[0]).Kind() != reflect.Struct {
-		msgSend.Content = common.ReplaceServerInvites(fmt.Sprint(s...), 0, "[removed-server-invite]")
+	if msgSend.Content != "" && reflect.TypeOf(s[0]).Kind() != reflect.Pointer && reflect.TypeOf(s[0]).Kind() != reflect.Struct {
+		msgSend.Content = fmt.Sprint(s...)
 	}
-	serverInfo := bot.GenerateServerInfoButton(c.GS.ID)
-	if len(msgSend.Components) >= 5 {
-		msgSend.Components = msgSend.Components[:4]
+
+	if err := bot.ValidateDMComponents(msgSend.Components); err != nil {
+		return "", err
 	}
-	msgSend.Components = append(serverInfo, msgSend.Components...)
+	msgSend.Components = bot.DMComponents(c.GS.ID, msgSend.Components, msgSend.Flags)
 
 	if msgSend.Reference != nil {
 		if msgSend.Reference.Type == discordgo.MessageReferenceTypeForward {
@@ -109,13 +110,13 @@ func (c *Context) tmplSendDM(s ...interface{}) string {
 
 	channel, err := common.BotSession.UserChannelCreate(c.MS.User.ID)
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	_, _ = common.BotSession.ChannelMessageSendComplex(channel.ID, msgSend)
-	return ""
+	return "", nil
 }
 
-func (c *Context) baseChannelArg(v interface{}) *dstate.ChannelState {
+func (c *Context) baseChannelArg(v any) *dstate.ChannelState {
 	// Look for the channel
 	if v == nil && c.CurrentFrame.CS != nil {
 		// No channel passed, assume current channel
@@ -154,7 +155,7 @@ func (c *Context) baseChannelArg(v interface{}) *dstate.ChannelState {
 }
 
 // ChannelArg converts a variety of types of argument into a channel, verifying that it exists
-func (c *Context) ChannelArg(v interface{}) int64 {
+func (c *Context) ChannelArg(v any) int64 {
 	cs := c.baseChannelArg(v)
 	if cs == nil {
 		return 0
@@ -164,7 +165,7 @@ func (c *Context) ChannelArg(v interface{}) int64 {
 }
 
 // ChannelArgNoDM is the same as ChannelArg but will not accept DM channels
-func (c *Context) ChannelArgNoDM(v interface{}) int64 {
+func (c *Context) ChannelArgNoDM(v any) int64 {
 	cs := c.baseChannelArg(v)
 	if cs == nil || cs.IsPrivate() {
 		return 0
@@ -173,7 +174,7 @@ func (c *Context) ChannelArgNoDM(v interface{}) int64 {
 	return cs.ID
 }
 
-func (c *Context) ChannelArgNoDMNoThread(v interface{}) int64 {
+func (c *Context) ChannelArgNoDMNoThread(v any) int64 {
 	cs := c.baseChannelArg(v)
 	if cs == nil || cs.IsPrivate() || cs.Type.IsThread() {
 		return 0
@@ -182,7 +183,7 @@ func (c *Context) ChannelArgNoDMNoThread(v interface{}) int64 {
 	return cs.ID
 }
 
-func (c *Context) tmplSendTemplateDM(name string, data ...interface{}) (interface{}, error) {
+func (c *Context) tmplSendTemplateDM(name string, data ...any) (any, error) {
 	if c.ExecutedFrom == ExecutedFromLeave {
 		return "", errors.New("can't use sendTemplateDM on leave msg")
 	}
@@ -190,11 +191,11 @@ func (c *Context) tmplSendTemplateDM(name string, data ...interface{}) (interfac
 	return c.sendNestedTemplate(nil, true, name, data...)
 }
 
-func (c *Context) tmplSendTemplate(channel interface{}, name string, data ...interface{}) (interface{}, error) {
+func (c *Context) tmplSendTemplate(channel any, name string, data ...any) (any, error) {
 	return c.sendNestedTemplate(channel, false, name, data...)
 }
 
-func (c *Context) sendNestedTemplate(channel interface{}, dm bool, name string, data ...interface{}) (interface{}, error) {
+func (c *Context) sendNestedTemplate(channel any, dm bool, name string, data ...any) (any, error) {
 	if c.IncreaseCheckCallCounter("exec_child", 3) {
 		return "", ErrTooManyCalls
 	}
@@ -264,7 +265,7 @@ func (c *Context) sendNestedTemplate(channel interface{}, dm bool, name string, 
 			return nil, errors.New("trying to pass the entire current context data in as templateargs, this is not needed, just use nil and access all other data normally")
 		}
 	} else if len(data) == 1 {
-		if cast, ok := data[0].(map[string]interface{}); ok && reflect.DeepEqual(cast, c.Data) {
+		if cast, ok := data[0].(map[string]any); ok && reflect.DeepEqual(cast, c.Data) {
 			return nil, errors.New("trying to pass the entire current context data in as templateargs, this is not needed, just use nil and access all other data normally")
 		}
 		c.Data["TemplateArgs"] = data[0]
@@ -374,7 +375,7 @@ func (c *Context) tmplSendMessage(filterSpecialMentions bool, returnID bool) fun
 		sendType := sendMessageGuildChannel
 		cid := c.ChannelArg(channel)
 		if cid == 0 {
-			return "", nil
+			return "", errors.New("unknown channel, or the bot cannot view it")
 		}
 
 		if cid != c.ChannelArgNoDM(channel) {
@@ -392,12 +393,11 @@ func (c *Context) tmplSendMessage(filterSpecialMentions bool, returnID bool) fun
 		}
 
 		if sendType == sendMessageDM {
-			msgSend.Content = common.ReplaceServerInvites(ToString(msg), 0, "[removed-server-invite]")
-			serverInfo := bot.GenerateServerInfoButton(c.GS.ID)
-			if len(msgSend.Components) >= 5 {
-				msgSend.Components = msgSend.Components[:4]
+			msgSend.Content = ToString(msg)
+			if err := bot.ValidateDMComponents(msgSend.Components); err != nil {
+				return "", err
 			}
-			msgSend.Components = append(serverInfo, msgSend.Components...)
+			msgSend.Components = bot.DMComponents(c.GS.ID, msgSend.Components, msgSend.Flags)
 		}
 
 		var repliedUser bool
@@ -438,8 +438,8 @@ func (c *Context) tmplSendMessage(filterSpecialMentions bool, returnID bool) fun
 	}
 }
 
-func (c *Context) tmplEditMessage(filterSpecialMentions bool) func(channel interface{}, msgID interface{}, msg interface{}) (interface{}, error) {
-	return func(channel interface{}, msgID interface{}, msg interface{}) (interface{}, error) {
+func (c *Context) tmplEditMessage(filterSpecialMentions bool) func(channel any, msgID any, msg any) (any, error) {
+	return func(channel any, msgID any, msg any) (any, error) {
 		if c.IncreaseCheckGenericAPICall() {
 			return "", ErrTooManyAPICalls
 		}
@@ -475,9 +475,9 @@ func (c *Context) tmplEditMessage(filterSpecialMentions bool) func(channel inter
 	}
 }
 
-func (c *Context) tmplSendComponentsMessage(filterSpecialMentions bool, returnID bool) func(channel interface{}, values ...interface{}) (interface{}, error) {
+func (c *Context) tmplSendComponentsMessage(filterSpecialMentions bool, returnID bool) func(channel any, values ...any) (any, error) {
 
-	return func(channel interface{}, values ...interface{}) (interface{}, error) {
+	return func(channel any, values ...any) (any, error) {
 		if c.IncreaseCheckGenericAPICall() {
 			return nil, errors.New("too many calls")
 		}
@@ -528,8 +528,8 @@ func (c *Context) tmplSendComponentsMessage(filterSpecialMentions bool, returnID
 	}
 }
 
-func (c *Context) tmplEditComponentsMessage(filterSpecialMentions bool) func(channel interface{}, msgID interface{}, values ...interface{}) (interface{}, error) {
-	return func(channel interface{}, msgID interface{}, values ...interface{}) (interface{}, error) {
+func (c *Context) tmplEditComponentsMessage(filterSpecialMentions bool) func(channel any, msgID any, values ...any) (any, error) {
+	return func(channel any, msgID any, values ...any) (any, error) {
 		if c.IncreaseCheckGenericAPICall() {
 			return "", ErrTooManyAPICalls
 		}
@@ -572,8 +572,8 @@ func (c *Context) tmplEditComponentsMessage(filterSpecialMentions bool) func(cha
 	}
 }
 
-func (c *Context) tmplPinMessage(unpin bool) func(channel, msgID interface{}) (string, error) {
-	return func(channel, msgID interface{}) (string, error) {
+func (c *Context) tmplPinMessage(unpin bool) func(channel, msgID any) (string, error) {
+	return func(channel, msgID any) (string, error) {
 		if c.IncreaseCheckCallCounter("message_pins", 2) {
 			return "", ErrTooManyCalls
 		}
@@ -593,7 +593,7 @@ func (c *Context) tmplPinMessage(unpin bool) func(channel, msgID interface{}) (s
 	}
 }
 
-func (c *Context) tmplPublishMessage(channel, msgID interface{}) (string, error) {
+func (c *Context) tmplPublishMessage(channel, msgID any) (string, error) {
 	// Too heavily ratelimited by Discord to allow rapid feeds to publish
 	if c.ExecutedFrom == ExecutedFromLeave || c.ExecutedFrom == ExecutedFromJoin {
 		return "", errors.New("cannot publish messages from a join/leave feed")
@@ -649,7 +649,7 @@ func (c *Context) tmplMentionHere() string {
 	return "@here"
 }
 
-func TargetUserID(input interface{}) int64 {
+func TargetUserID(input any) int64 {
 	switch t := input.(type) {
 	case *discordgo.User:
 		return t.ID
@@ -671,7 +671,7 @@ func TargetUserID(input interface{}) int64 {
 
 const DiscordRoleLimit = 250
 
-func (c *Context) tmplSetRoles(target interface{}, input interface{}) (string, error) {
+func (c *Context) tmplSetRoles(target any, input any) (string, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return "", ErrTooManyAPICalls
 	}
@@ -849,7 +849,7 @@ func (c *Context) hasPerms(ms *dstate.MemberState, channelID int64, needed int64
 	return perms&needed == needed, nil
 }
 
-func (c *Context) tmplGetTargetPermissionsIn(target interface{}, channel interface{}) (int64, error) {
+func (c *Context) tmplGetTargetPermissionsIn(target any, channel any) (int64, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return 0, ErrTooManyAPICalls
 	}
@@ -872,7 +872,7 @@ func (c *Context) tmplGetTargetPermissionsIn(target interface{}, channel interfa
 	return c.GS.GetMemberPermissions(channelID, ms.User.ID, ms.Member.Roles)
 }
 
-func (c *Context) tmplDelResponse(args ...interface{}) string {
+func (c *Context) tmplDelResponse(args ...any) string {
 	dur := 10
 	if len(args) > 0 {
 		dur = int(ToInt64(args[0]))
@@ -886,7 +886,7 @@ func (c *Context) tmplDelResponse(args ...interface{}) string {
 	return ""
 }
 
-func (c *Context) tmplDelTrigger(args ...interface{}) string {
+func (c *Context) tmplDelTrigger(args ...any) string {
 	if c.Msg != nil {
 		return c.tmplDelMessage(c.Msg.ChannelID, c.Msg.ID, args...)
 	}
@@ -894,7 +894,7 @@ func (c *Context) tmplDelTrigger(args ...interface{}) string {
 	return ""
 }
 
-func (c *Context) tmplDelMessage(channel, msgID interface{}, args ...interface{}) string {
+func (c *Context) tmplDelMessage(channel, msgID any, args ...any) string {
 	cID := c.ChannelArgNoDM(channel)
 	if cID == 0 {
 		return ""
@@ -925,7 +925,7 @@ func (c *Context) tmplDelMessageReaction(values ...reflect.Value) (reflect.Value
 			return reflect.Value{}, errors.New("not enough arguments (need channelID, messageID, userID, emoji)")
 		}
 
-		var cArg interface{}
+		var cArg any
 		if args[0].IsValid() {
 			cArg = args[0].Interface()
 		}
@@ -971,7 +971,7 @@ func (c *Context) tmplDelAllMessageReactions(values ...reflect.Value) (reflect.V
 			return reflect.Value{}, errors.New("not enough arguments (need channelID, messageID, emojis[optional])")
 		}
 
-		var cArg interface{}
+		var cArg any
 		if args[0].IsValid() {
 			cArg = args[0].Interface()
 		}
@@ -1009,7 +1009,7 @@ func (c *Context) tmplDelAllMessageReactions(values ...reflect.Value) (reflect.V
 	return callVariadic(f, false, values...)
 }
 
-func (c *Context) tmplGetMessage(channel, msgID interface{}) (*discordgo.Message, error) {
+func (c *Context) tmplGetMessage(channel, msgID any) (*discordgo.Message, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return nil, ErrTooManyAPICalls
 	}
@@ -1029,7 +1029,7 @@ func (c *Context) tmplGetMessage(channel, msgID interface{}) (*discordgo.Message
 	return message, nil
 }
 
-func (c *Context) tmplGetMember(target interface{}) (*discordgo.Member, error) {
+func (c *Context) tmplGetMember(target any) (*discordgo.Member, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return nil, ErrTooManyAPICalls
 	}
@@ -1085,7 +1085,7 @@ func (c *Context) tmplMemberAboveRole(a *discordgo.Member, role *discordgo.Role)
 	return bot.IsMemberAboveRole(c.GS, aState, role), nil
 }
 
-func (c *Context) tmplGetMemberVoiceState(target interface{}) (*discordgo.VoiceState, error) {
+func (c *Context) tmplGetMemberVoiceState(target any) (*discordgo.VoiceState, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return nil, ErrTooManyAPICalls
 	}
@@ -1103,7 +1103,7 @@ func (c *Context) tmplGetMemberVoiceState(target interface{}) (*discordgo.VoiceS
 	return vs, nil
 }
 
-func (c *Context) tmplGetChannel(channel interface{}) (*CtxChannel, error) {
+func (c *Context) tmplGetChannel(channel any) (*CtxChannel, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return nil, ErrTooManyAPICalls
 	}
@@ -1122,7 +1122,7 @@ func (c *Context) tmplGetChannel(channel interface{}) (*CtxChannel, error) {
 	return CtxChannelFromCS(cstate), nil
 }
 
-func (c *Context) tmplGetThread(channel interface{}) (*CtxChannel, error) {
+func (c *Context) tmplGetThread(channel any) (*CtxChannel, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return nil, ErrTooManyAPICalls
 	}
@@ -1162,7 +1162,7 @@ func (c *Context) tmplGetThread(channel interface{}) (*CtxChannel, error) {
 	return CtxChannelFromCS(&tstate), nil
 }
 
-func (c *Context) tmplThreadMemberAdd(threadID, memberID interface{}) string {
+func (c *Context) tmplThreadMemberAdd(threadID, memberID any) string {
 
 	if c.IncreaseCheckGenericAPICall() {
 		return ""
@@ -1187,8 +1187,24 @@ func (c *Context) tmplThreadMemberAdd(threadID, memberID interface{}) string {
 	return ""
 }
 
-func (c *Context) tmplCloseThread(channel interface{}, flags ...bool) (string, error) {
+func (c *Context) tmplLockThread(channel any) (string, error) {
+	return c.editThreadStatus(channel, true, false)
+}
 
+func (c *Context) tmplCloseThread(channel any, flags ...bool) (string, error) {
+	var lock bool
+	switch len(flags) {
+	case 0:
+	case 1:
+		lock = flags[0]
+	default:
+		return "", errors.New("too many flags")
+	}
+
+	return c.editThreadStatus(channel, lock, true)
+}
+
+func (c *Context) editThreadStatus(channel any, lock, archive bool) (string, error) {
 	if c.IncreaseCheckCallCounter("edit_thread", 10) {
 		return "", ErrTooManyCalls
 	}
@@ -1208,21 +1224,11 @@ func (c *Context) tmplCloseThread(channel interface{}, flags ...bool) (string, e
 	}
 
 	edit := &discordgo.ChannelEdit{}
-	var lock bool
-	switch len(flags) {
-	case 0:
-		lock = false
-	case 1:
-		lock = flags[0]
-	default:
-		return "", errors.New("too many flags")
-	}
-
 	if lock {
 		edit.Locked = &lock
-	} else {
-		archived := true
-		edit.Archived = &archived
+	}
+	if archive {
+		edit.Archived = &archive
 	}
 
 	threadReturn, err := common.BotSession.ChannelEditComplex(cID, edit)
@@ -1236,7 +1242,7 @@ func (c *Context) tmplCloseThread(channel interface{}, flags ...bool) (string, e
 	return "", nil
 }
 
-func (c *Context) tmplCreateThread(channel, msgID, name interface{}, optionals ...interface{}) (*CtxChannel, error) {
+func (c *Context) tmplCreateThread(channel, msgID, name any, optionals ...any) (*CtxChannel, error) {
 	if c.IncreaseCheckCallCounterPremium("create_thread", 1, 1) {
 		return nil, ErrTooManyCalls
 	}
@@ -1342,7 +1348,7 @@ func (c *Context) overwriteThreadInGuildSet(t *dstate.ChannelState) {
 }
 
 // This function can delete both basic threads and forum threads
-func (c *Context) tmplDeleteThread(thread interface{}) (string, error) {
+func (c *Context) tmplDeleteThread(thread any) (string, error) {
 	if c.IncreaseCheckCallCounterPremium("delete_thread", 1, 1) {
 		return "", ErrTooManyCalls
 	}
@@ -1361,7 +1367,7 @@ func (c *Context) tmplDeleteThread(thread interface{}) (string, error) {
 	return "", nil
 }
 
-func (c *Context) tmplEditThread(channel interface{}, args ...interface{}) (string, error) {
+func (c *Context) tmplEditThread(channel any, args ...any) (string, error) {
 
 	if c.IncreaseCheckCallCounter("edit_thread", 10) {
 		return "", ErrTooManyCalls
@@ -1452,7 +1458,7 @@ func (c *Context) tmplOpenThread(cID int64) (string, error) {
 	return "", nil
 }
 
-func (c *Context) tmplThreadMemberRemove(threadID, memberID interface{}) string {
+func (c *Context) tmplThreadMemberRemove(threadID, memberID any) string {
 	if c.IncreaseCheckGenericAPICall() {
 		return ""
 	}
@@ -1476,7 +1482,7 @@ func (c *Context) tmplThreadMemberRemove(threadID, memberID interface{}) string 
 	return ""
 }
 
-func (c *Context) tmplCreateForumPost(channel, name, content interface{}, optional ...interface{}) (*CtxChannel, error) {
+func (c *Context) tmplCreateForumPost(channel, name, content any, optional ...any) (*CtxChannel, error) {
 
 	// shares same counter as create thread
 	if c.IncreaseCheckCallCounterPremium("create_thread", 1, 1) {
@@ -1566,7 +1572,7 @@ type partialThread struct {
 
 // Accepts a parent channel and key-value pair arguments. Returns a partial
 // channel object with values set according to passed values.
-func processThreadArgs(newThread bool, parent *dstate.ChannelState, values ...interface{}) (*partialThread, error) {
+func processThreadArgs(newThread bool, parent *dstate.ChannelState, values ...any) (*partialThread, error) {
 
 	c := &partialThread{}
 	if newThread {
@@ -1610,10 +1616,7 @@ func processThreadArgs(newThread bool, parent *dstate.ChannelState, values ...in
 			} else if v.Kind() == reflect.Slice {
 				// used to get rid of any duplicate tags the user might have sent
 				seen := make(map[string]struct{})
-				size := v.Len()
-				if size > maxTags {
-					size = maxTags
-				}
+				size := min(v.Len(), maxTags)
 
 				tags = make([]int64, 0, size)
 				for i := 0; i < v.Len() && len(seen) < size; i++ {
@@ -1665,8 +1668,8 @@ func processThreadArgs(newThread bool, parent *dstate.ChannelState, values ...in
 	return c, nil
 }
 
-func (c *Context) tmplPinForumPost(unpin bool) func(channel interface{}) (string, error) {
-	return func(channel interface{}) (string, error) {
+func (c *Context) tmplPinForumPost(unpin bool) func(channel any) (string, error) {
+	return func(channel any) (string, error) {
 
 		if c.IncreaseCheckCallCounter("edit_thread", 10) {
 			return "", ErrTooManyCalls
@@ -1714,7 +1717,7 @@ func (c *Context) tmplPinForumPost(unpin bool) func(channel interface{}) (string
 	}
 }
 
-func (c *Context) tmplGetChannelOrThread(channel interface{}) (*CtxChannel, error) {
+func (c *Context) tmplGetChannelOrThread(channel any) (*CtxChannel, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return nil, ErrTooManyAPICalls
 	}
@@ -1733,8 +1736,8 @@ func (c *Context) tmplGetChannelOrThread(channel interface{}) (*CtxChannel, erro
 	return CtxChannelFromCS(cstate), nil
 }
 
-func (c *Context) tmplGetChannelPins(pinCount bool) func(channel interface{}) (interface{}, error) {
-	return func(channel interface{}) (interface{}, error) {
+func (c *Context) tmplGetChannelPins(pinCount bool) func(channel any) (any, error) {
+	return func(channel any) (any, error) {
 		if c.IncreaseCheckCallCounterPremium("channel_pins", 1, 2) {
 			return 0, ErrTooManyCalls
 		}
@@ -1812,7 +1815,7 @@ func (c *Context) tmplAddMessageReactions(values ...reflect.Value) (reflect.Valu
 		}
 
 		// cArg := args[0].Interface()
-		var cArg interface{}
+		var cArg any
 		if args[0].IsValid() {
 			cArg = args[0].Interface()
 		}
@@ -1869,7 +1872,7 @@ func (c *Context) tmplCurrentUserCreated() time.Time {
 	return t
 }
 
-func (c *Context) tmplSleep(duration interface{}) (string, error) {
+func (c *Context) tmplSleep(duration any) (string, error) {
 	seconds := tmplToInt(duration)
 	if c.secondsSlept+seconds > 60 || seconds < 1 {
 		return "", errors.New("can sleep for max 60 seconds combined")
@@ -1982,7 +1985,7 @@ func (c *Context) reSplit(r, s string, i ...int) ([]string, error) {
 	return compiled.Split(s, n), nil
 }
 
-func (c *Context) tmplEditChannelName(channel interface{}, newName string) (string, error) {
+func (c *Context) tmplEditChannelName(channel any, newName string) (string, error) {
 	if c.IncreaseCheckCallCounter("edit_channel", 10) {
 		return "", ErrTooManyCalls
 	}
@@ -2006,7 +2009,34 @@ func (c *Context) tmplEditChannelName(channel interface{}, newName string) (stri
 	return "", err
 }
 
-func (c *Context) tmplEditChannelTopic(channel interface{}, newTopic string) (string, error) {
+// tmplSetVoiceStatus sets the status shown under a voice channel, an empty status clears it
+func (c *Context) tmplSetVoiceStatus(channel any, status string) (string, error) {
+	if c.IncreaseCheckCallCounter("edit_channel", 10) {
+		return "", ErrTooManyCalls
+	}
+
+	cID := c.ChannelArgNoDMNoThread(channel)
+	if cID == 0 {
+		return "", errors.New("unknown channel")
+	}
+
+	cs := c.GS.GetChannel(cID)
+	if cs == nil || cs.Type != discordgo.ChannelTypeGuildVoice {
+		return "", errors.New("the channel is not a voice channel")
+	}
+
+	if utf8.RuneCountInString(status) > 500 {
+		return "", errors.New("voice channel status can be at most 500 characters")
+	}
+
+	if c.IncreaseCheckCallCounter("set_voice_status"+strconv.FormatInt(cID, 10), 1) {
+		return "", ErrTooManyCalls
+	}
+
+	return "", common.BotSession.ChannelVoiceStatusSet(cID, status)
+}
+
+func (c *Context) tmplEditChannelTopic(channel any, newTopic string) (string, error) {
 	if c.IncreaseCheckCallCounter("edit_channel", 10) {
 		return "", ErrTooManyCalls
 	}
@@ -2085,7 +2115,7 @@ func (c *Context) tmplEditNickname(Nickname string) (string, error) {
 	return "", nil
 }
 
-func (c *Context) tmplSort(input interface{}, args ...interface{}) (interface{}, error) {
+func (c *Context) tmplSort(input any, args ...any) (any, error) {
 	if c.IncreaseCheckCallCounterPremium("sort", 1, 3) {
 		return "", ErrTooManyCalls
 	}
@@ -2153,7 +2183,7 @@ type sortOpts struct {
 	Key     reflect.Value
 }
 
-func parseSortOpts(args ...interface{}) (*sortOpts, error) {
+func parseSortOpts(args ...any) (*sortOpts, error) {
 	opts := defaultSortOpts
 	if len(args) == 0 {
 		return &opts, nil
@@ -2263,7 +2293,7 @@ func (c comparator) Less(a, b reflect.Value) bool {
 	}
 }
 
-var timeType = reflect.TypeOf(time.Time{})
+var timeType = reflect.TypeFor[time.Time]()
 
 func comparatorOf(v reflect.Value) (comparator, error) {
 	switch v.Kind() {
@@ -2295,7 +2325,7 @@ const (
 
 // FindRole tries to resolve the argument to a role. `accept` specifies the set of allowed input
 // types, tested in the following order: ID, role mention, role name, role object.
-func (c *Context) FindRole(role interface{}, accept roleInputType) *discordgo.Role {
+func (c *Context) FindRole(role any, accept roleInputType) *discordgo.Role {
 	switch t := role.(type) {
 	case string:
 		if (accept & acceptRoleID) != 0 {
@@ -2344,7 +2374,7 @@ func (c *Context) FindRole(role interface{}, accept roleInputType) *discordgo.Ro
 	return nil
 }
 
-func (c *Context) getRole(roleInput interface{}, accept roleInputType) (*discordgo.Role, error) {
+func (c *Context) getRole(roleInput any, accept roleInputType) (*discordgo.Role, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return nil, ErrTooManyCalls
 	}
@@ -2352,11 +2382,11 @@ func (c *Context) getRole(roleInput interface{}, accept roleInputType) (*discord
 	return c.FindRole(roleInput, accept), nil
 }
 
-func (c *Context) tmplGetRole(roleInput interface{}) (*discordgo.Role, error) {
+func (c *Context) tmplGetRole(roleInput any) (*discordgo.Role, error) {
 	return c.getRole(roleInput, acceptAllRoleInput)
 }
 
-func (c *Context) tmplGetRoleID(roleID interface{}) (*discordgo.Role, error) {
+func (c *Context) tmplGetRoleID(roleID any) (*discordgo.Role, error) {
 	return c.getRole(roleID, acceptRoleID)
 }
 
@@ -2364,7 +2394,7 @@ func (c *Context) tmplGetRoleName(roleName string) (*discordgo.Role, error) {
 	return c.getRole(roleName, acceptRoleName)
 }
 
-func (c *Context) mentionRole(roleInput interface{}, accept roleInputType) string {
+func (c *Context) mentionRole(roleInput any, accept roleInputType) string {
 	if c.IncreaseCheckGenericAPICall() {
 		return ""
 	}
@@ -2382,11 +2412,11 @@ func (c *Context) mentionRole(roleInput interface{}, accept roleInputType) strin
 	return role.Mention()
 }
 
-func (c *Context) tmplMentionRole(roleInput interface{}) string {
+func (c *Context) tmplMentionRole(roleInput any) string {
 	return c.mentionRole(roleInput, acceptAllRoleInput)
 }
 
-func (c *Context) tmplMentionRoleID(roleID interface{}) string {
+func (c *Context) tmplMentionRoleID(roleID any) string {
 	return c.mentionRole(roleID, acceptRoleID)
 }
 
@@ -2394,7 +2424,7 @@ func (c *Context) tmplMentionRoleName(roleName string) string {
 	return c.mentionRole(roleName, acceptRoleName)
 }
 
-func (c *Context) hasRole(roleInput interface{}, accept roleInputType) bool {
+func (c *Context) hasRole(roleInput any, accept roleInputType) bool {
 	if c.IncreaseCheckGenericAPICall() {
 		return false
 	}
@@ -2411,11 +2441,11 @@ func (c *Context) hasRole(roleInput interface{}, accept roleInputType) bool {
 	return slices.Contains(c.MS.Member.Roles, role.ID)
 }
 
-func (c *Context) tmplHasRole(roleInput interface{}) bool {
+func (c *Context) tmplHasRole(roleInput any) bool {
 	return c.hasRole(roleInput, acceptAllRoleInput)
 }
 
-func (c *Context) tmplHasRoleID(roleID interface{}) bool {
+func (c *Context) tmplHasRoleID(roleID any) bool {
 	return c.hasRole(roleID, acceptRoleID)
 }
 
@@ -2423,7 +2453,7 @@ func (c *Context) tmplHasRoleName(roleName string) bool {
 	return c.hasRole(roleName, acceptRoleName)
 }
 
-func (c *Context) targetHasRole(target interface{}, roleInput interface{}, accept roleInputType) (bool, error) {
+func (c *Context) targetHasRole(target any, roleInput any, accept roleInputType) (bool, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return false, ErrTooManyAPICalls
 	}
@@ -2450,19 +2480,19 @@ func (c *Context) targetHasRole(target interface{}, roleInput interface{}, accep
 	return slices.Contains(ms.Member.Roles, role.ID), nil
 }
 
-func (c *Context) tmplTargetHasRole(target interface{}, roleInput interface{}) (bool, error) {
+func (c *Context) tmplTargetHasRole(target any, roleInput any) (bool, error) {
 	return c.targetHasRole(target, roleInput, acceptAllRoleInput)
 }
 
-func (c *Context) tmplTargetHasRoleID(target interface{}, roleID interface{}) (bool, error) {
+func (c *Context) tmplTargetHasRoleID(target any, roleID any) (bool, error) {
 	return c.targetHasRole(target, roleID, acceptRoleID)
 }
 
-func (c *Context) tmplTargetHasRoleName(target interface{}, roleName string) (bool, error) {
+func (c *Context) tmplTargetHasRoleName(target any, roleName string) (bool, error) {
 	return c.targetHasRole(target, roleName, acceptRoleName)
 }
 
-func (c *Context) giveRole(target interface{}, roleInput interface{}, accept roleInputType, optionalArgs ...interface{}) string {
+func (c *Context) giveRole(target any, roleInput any, accept roleInputType, optionalArgs ...any) string {
 	if c.IncreaseCheckGenericAPICall() {
 		return ""
 	}
@@ -2508,19 +2538,19 @@ func (c *Context) giveRole(target interface{}, roleInput interface{}, accept rol
 	return ""
 }
 
-func (c *Context) tmplGiveRole(target interface{}, roleInput interface{}, optionalArgs ...interface{}) string {
+func (c *Context) tmplGiveRole(target any, roleInput any, optionalArgs ...any) string {
 	return c.giveRole(target, roleInput, acceptAllRoleInput, optionalArgs...)
 }
 
-func (c *Context) tmplGiveRoleID(target interface{}, roleID interface{}, optionalArgs ...interface{}) string {
+func (c *Context) tmplGiveRoleID(target any, roleID any, optionalArgs ...any) string {
 	return c.giveRole(target, roleID, acceptRoleID, optionalArgs...)
 }
 
-func (c *Context) tmplGiveRoleName(target interface{}, roleName string, optionalArgs ...interface{}) string {
+func (c *Context) tmplGiveRoleName(target any, roleName string, optionalArgs ...any) string {
 	return c.giveRole(target, roleName, acceptRoleName, optionalArgs...)
 }
 
-func (c *Context) addRole(roleInput interface{}, accept roleInputType, optionalArgs ...interface{}) (string, error) {
+func (c *Context) addRole(roleInput any, accept roleInputType, optionalArgs ...any) (string, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return "", ErrTooManyAPICalls
 	}
@@ -2554,19 +2584,19 @@ func (c *Context) addRole(roleInput interface{}, accept roleInputType, optionalA
 	return "", nil
 }
 
-func (c *Context) tmplAddRole(roleInput interface{}, optionalArgs ...interface{}) (string, error) {
+func (c *Context) tmplAddRole(roleInput any, optionalArgs ...any) (string, error) {
 	return c.addRole(roleInput, acceptAllRoleInput, optionalArgs...)
 }
 
-func (c *Context) tmplAddRoleID(roleID interface{}, optionalArgs ...interface{}) (string, error) {
+func (c *Context) tmplAddRoleID(roleID any, optionalArgs ...any) (string, error) {
 	return c.addRole(roleID, acceptRoleID, optionalArgs...)
 }
 
-func (c *Context) tmplAddRoleName(roleName string, optionalArgs ...interface{}) (string, error) {
+func (c *Context) tmplAddRoleName(roleName string, optionalArgs ...any) (string, error) {
 	return c.addRole(roleName, acceptRoleName, optionalArgs...)
 }
 
-func (c *Context) takeRole(target interface{}, roleInput interface{}, accept roleInputType, optionalArgs ...interface{}) string {
+func (c *Context) takeRole(target any, roleInput any, accept roleInputType, optionalArgs ...any) string {
 	if c.IncreaseCheckGenericAPICall() {
 		return ""
 	}
@@ -2611,19 +2641,19 @@ func (c *Context) takeRole(target interface{}, roleInput interface{}, accept rol
 	return ""
 }
 
-func (c *Context) tmplTakeRole(target interface{}, roleInput interface{}, optionalArgs ...interface{}) string {
+func (c *Context) tmplTakeRole(target any, roleInput any, optionalArgs ...any) string {
 	return c.takeRole(target, roleInput, acceptAllRoleInput, optionalArgs...)
 }
 
-func (c *Context) tmplTakeRoleID(target interface{}, roleID interface{}, optionalArgs ...interface{}) string {
+func (c *Context) tmplTakeRoleID(target any, roleID any, optionalArgs ...any) string {
 	return c.takeRole(target, roleID, acceptRoleID, optionalArgs...)
 }
 
-func (c *Context) tmplTakeRoleName(target interface{}, roleName string, optionalArgs ...interface{}) string {
+func (c *Context) tmplTakeRoleName(target any, roleName string, optionalArgs ...any) string {
 	return c.takeRole(target, roleName, acceptRoleName, optionalArgs...)
 }
 
-func (c *Context) removeRole(roleInput interface{}, accept roleInputType, optionalArgs ...interface{}) (string, error) {
+func (c *Context) removeRole(roleInput any, accept roleInputType, optionalArgs ...any) (string, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return "", ErrTooManyAPICalls
 	}
@@ -2657,19 +2687,19 @@ func (c *Context) removeRole(roleInput interface{}, accept roleInputType, option
 	return "", nil
 }
 
-func (c *Context) tmplRemoveRole(roleInput interface{}, optionalArgs ...interface{}) (string, error) {
+func (c *Context) tmplRemoveRole(roleInput any, optionalArgs ...any) (string, error) {
 	return c.removeRole(roleInput, acceptAllRoleInput, optionalArgs...)
 }
 
-func (c *Context) tmplRemoveRoleID(roleID interface{}, optionalArgs ...interface{}) (string, error) {
+func (c *Context) tmplRemoveRoleID(roleID any, optionalArgs ...any) (string, error) {
 	return c.removeRole(roleID, acceptRoleID, optionalArgs...)
 }
 
-func (c *Context) tmplRemoveRoleName(roleName string, optionalArgs ...interface{}) (string, error) {
+func (c *Context) tmplRemoveRoleName(roleName string, optionalArgs ...any) (string, error) {
 	return c.removeRole(roleName, acceptRoleName, optionalArgs...)
 }
 
-func (c *Context) validateDurationDelay(in interface{}) time.Duration {
+func (c *Context) validateDurationDelay(in any) time.Duration {
 	switch t := in.(type) {
 	case int, int64:
 		return time.Second * ToDuration(t)

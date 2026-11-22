@@ -30,15 +30,25 @@ var _ commands.CommandProvider = (*Plugin)(nil)
 func (p *Plugin) AddCommands() {
 	if confEnableUsernameTracking.GetBool() {
 		commands.AddRootCommands(p, cmdLogs, cmdWhois, cmdNicknames, cmdUsernames, cmdClearNames)
-	} else {
-		commands.AddRootCommands(p, cmdLogs, cmdWhois)
-		if run.FlagGenCmdDocs {
-			for _, cmd := range []*commands.YAGCommand{cmdNicknames, cmdUsernames, cmdClearNames} {
-				cmd.Description = fmt.Sprint(cmd.Description, " Disabled on the public instance.")
-				commands.AddRootCommands(p, cmd)
-			}
-		}
+		return
 	}
+
+	commands.AddRootCommands(p, cmdLogs, cmdWhois)
+
+	// Still registered while tracking is off so "help usernames" can say why the
+	// command does nothing, but kept out of the command list and unable to run.
+	// The docs list them instead of hiding them.
+	for _, cmd := range []*commands.YAGCommand{cmdNicknames, cmdUsernames, cmdClearNames} {
+		cmd.Description = fmt.Sprint(cmd.Description, " Disabled on the public instance.")
+		if !run.FlagGenCmdDocs {
+			cmd.RunFunc = runDisabledCommand
+		}
+		commands.AddRootCommands(p, cmd)
+	}
+}
+
+func runDisabledCommand(data *dcmd.Data) (any, error) {
+	return "This command is disabled on the public instance.", nil
 }
 
 func (p *Plugin) BotInit() {
@@ -63,11 +73,11 @@ var cmdLogs = &commands.YAGCommand{
 		{Name: "Count", Default: 100, Type: &dcmd.IntArg{Min: 2, Max: 250}},
 	},
 	ArgSwitches: []*dcmd.ArgDef{
-		{Name: "channel", Help: "Optional channel to log instead", Type: dcmd.Channel},
+		{Name: "channel", Help: "Optional channel to log instead", Type: dcmd.ChannelOrThread},
 	},
 	SlashCommandEnabled: true,
 	DefaultEnabled:      false,
-	RunFunc: func(cmd *dcmd.Data) (interface{}, error) {
+	RunFunc: func(cmd *dcmd.Data) (any, error) {
 		num := cmd.Args[0].Int()
 
 		cID := cmd.ChannelID
@@ -108,7 +118,7 @@ var cmdWhois = &commands.YAGCommand{
 	},
 	SlashCommandEnabled: true,
 	DefaultEnabled:      false,
-	RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+	RunFunc: func(parsed *dcmd.Data) (any, error) {
 		config, err := GetConfig(common.PQ, parsed.Context(), parsed.GuildData.GS.ID)
 		if err != nil {
 			return nil, err
@@ -236,15 +246,16 @@ var cmdWhois = &commands.YAGCommand{
 					return err, err
 				}
 
-				usernamesStr := "```\n"
+				var usernamesStr strings.Builder
+				usernamesStr.WriteString("```\n")
 				for _, v := range usernames {
-					usernamesStr += fmt.Sprintf("%20s: %s\n", v.CreatedAt.Time.UTC().Format(time.RFC822), v.Username.String)
+					usernamesStr.WriteString(fmt.Sprintf("%20s: %s\n", v.CreatedAt.Time.UTC().Format(time.RFC822), v.Username.String))
 				}
-				usernamesStr += "```"
+				usernamesStr.WriteString("```")
 
 				embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
 					Name:  "5 last usernames",
-					Value: usernamesStr,
+					Value: usernamesStr.String(),
 				})
 			} else {
 				embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
@@ -260,19 +271,20 @@ var cmdWhois = &commands.YAGCommand{
 					return err, err
 				}
 
-				nicknameStr := "```\n"
+				var nicknameStr strings.Builder
+				nicknameStr.WriteString("```\n")
 				if len(nicknames) < 1 {
-					nicknameStr += "No nicknames tracked"
+					nicknameStr.WriteString("No nicknames tracked")
 				} else {
 					for _, v := range nicknames {
-						nicknameStr += fmt.Sprintf("%20s: %s\n", v.CreatedAt.Time.UTC().Format(time.RFC822), v.Nickname.String)
+						nicknameStr.WriteString(fmt.Sprintf("%20s: %s\n", v.CreatedAt.Time.UTC().Format(time.RFC822), v.Nickname.String))
 					}
 				}
-				nicknameStr += "```"
+				nicknameStr.WriteString("```")
 
 				embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
 					Name:  "5 last nicknames",
-					Value: nicknameStr,
+					Value: nicknameStr.String(),
 				})
 			} else {
 				embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
@@ -286,15 +298,17 @@ var cmdWhois = &commands.YAGCommand{
 }
 
 var cmdUsernames = &commands.YAGCommand{
-	CmdCategory: commands.CategoryTool,
-	Name:        "Usernames",
-	Description: "Shows past usernames of a user.",
-	Aliases:     []string{"unames", "un"},
-	RunInDM:     true,
+	CmdCategory:          commands.CategoryTool,
+	Name:                 "Usernames",
+	Description:          "Shows past usernames of a user.",
+	Aliases:              []string{"unames", "un"},
+	RunInDM:              true,
+	HideFromHelp:         true,
+	HideFromCommandsPage: true,
 	Arguments: []*dcmd.ArgDef{
 		{Name: "User", Type: dcmd.User},
 	},
-	RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+	RunFunc: func(parsed *dcmd.Data) (any, error) {
 		gID := int64(0)
 		if parsed.GuildData != nil {
 			config, err := GetConfig(common.PQ, parsed.Context(), parsed.GuildData.GS.ID)
@@ -347,15 +361,17 @@ var cmdUsernames = &commands.YAGCommand{
 }
 
 var cmdNicknames = &commands.YAGCommand{
-	CmdCategory: commands.CategoryTool,
-	Name:        "Nicknames",
-	Description: "Shows past nicknames of a user.",
-	Aliases:     []string{"nn"},
-	RunInDM:     false,
+	CmdCategory:          commands.CategoryTool,
+	Name:                 "Nicknames",
+	Description:          "Shows past nicknames of a user.",
+	Aliases:              []string{"nn"},
+	RunInDM:              false,
+	HideFromHelp:         true,
+	HideFromCommandsPage: true,
 	Arguments: []*dcmd.ArgDef{
 		{Name: "User", Type: dcmd.User},
 	},
-	RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+	RunFunc: func(parsed *dcmd.Data) (any, error) {
 		config, err := GetConfig(common.PQ, parsed.Context(), parsed.GuildData.GS.ID)
 		if err != nil {
 			return nil, err
@@ -405,12 +421,13 @@ var cmdNicknames = &commands.YAGCommand{
 }
 
 var cmdClearNames = &commands.YAGCommand{
-	CmdCategory: commands.CategoryTool,
-	Name:        "ResetPastNames",
-	Description: "Reset your past usernames/nicknames.",
-	RunInDM:     true,
-	// Cooldown:    100,
-	RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+	CmdCategory:          commands.CategoryTool,
+	Name:                 "ResetPastNames",
+	Description:          "Reset your past usernames/nicknames.",
+	RunInDM:              true,
+	HideFromHelp:         true,
+	HideFromCommandsPage: true,
+	RunFunc: func(parsed *dcmd.Data) (any, error) {
 		queries := []string{
 			"DELETE FROM username_listings WHERE user_id=$1",
 			"DELETE FROM nickname_listings WHERE user_id=$1",
@@ -477,7 +494,7 @@ func HandleQueueEvt(evt *eventsystem.EventData) {
 	queueEvt(evt.EvtInterface)
 }
 
-func queueEvt(evt interface{}) {
+func queueEvt(evt any) {
 	if !confEnableUsernameTracking.GetBool() {
 		return
 	}
@@ -562,7 +579,7 @@ func CheckNickname(exec boil.ContextExecutor, ctx context.Context, nicknameStmt 
 }
 
 var (
-	evtChan   = make(chan interface{}, 1000)
+	evtChan   = make(chan any, 1000)
 	evtChanGC = make(chan *LightGC)
 )
 
@@ -571,7 +588,7 @@ type UserGuildPair struct {
 	User    *discordgo.User
 }
 
-var confEnableUsernameTracking = config.RegisterOption("yagpdb.enable_username_tracking", "Enable username tracking", true)
+var confEnableUsernameTracking = config.RegisterOption("yagpdb.enable_username_tracking", "Record username and nickname history, and enable the usernames, nicknames and resetpastnames commands. Off by default; opt in by setting this to true", false)
 
 // Queue up all the events and process them one by one, because of limited connections
 func EvtProcesser() {
@@ -744,7 +761,7 @@ func GetConfigCached(exec boil.ContextExecutor, gID int64) (*models.GuildLogging
 		return GetConfig(exec, context.Background(), gID)
 	}
 
-	v, err := configCache.GetCustomFetch(gs.ID, func(key interface{}) (interface{}, error) {
+	v, err := configCache.GetCustomFetch(gs.ID, func(key any) (any, error) {
 		conf, err := GetConfig(exec, context.Background(), gID)
 		return conf, err
 	})

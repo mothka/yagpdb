@@ -2,6 +2,7 @@ package common
 
 import (
 	"regexp"
+	"sync"
 
 	"github.com/botlabs-gg/yagpdb/v2/lib/confusables"
 )
@@ -28,9 +29,9 @@ var ThirdpartyDiscordSites = []*InviteSource{
 var AllInviteSources = append([]*InviteSource{DiscordInviteSource}, ThirdpartyDiscordSites...)
 
 func ReplaceServerInvites(msg string, guildID int64, replacement string) string {
+	msg = confusables.NormalizeQueryEncodedText(msg)
 
 	for _, s := range AllInviteSources {
-		msg = confusables.NormalizeQueryEncodedText(msg)
 		msg = s.Regex.ReplaceAllString(msg, replacement)
 	}
 
@@ -52,4 +53,27 @@ func ContainsInvite(s string, checkDiscordSource, checkThirdPartySources bool) *
 	}
 
 	return nil
+}
+
+var (
+	serverPreviewLinkRegex     *regexp.Regexp
+	serverPreviewLinkRegexOnce sync.Once
+)
+
+// ServerPreviewLinkKeys returns the server ID or custom link of every server preview link in s.
+func ServerPreviewLinkKeys(s string) []string {
+	serverPreviewLinkRegexOnce.Do(func() {
+		if host := ConfHost.GetString(); host != "" {
+			serverPreviewLinkRegex = regexp.MustCompile(`(?i)` + regexp.QuoteMeta(host) + `[\/\\]+s[\/\\]+([a-z0-9-]+)`)
+		}
+	})
+	if serverPreviewLinkRegex == nil {
+		return nil
+	}
+
+	var keys []string
+	for _, match := range serverPreviewLinkRegex.FindAllStringSubmatch(confusables.NormalizeQueryEncodedText(s), -1) {
+		keys = append(keys, match[1])
+	}
+	return keys
 }

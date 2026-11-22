@@ -2,6 +2,7 @@
 {{template "cp_head" .}}
 <header class="page-header">
     <h2>Command settings</h2>
+    {{template "cp_docs_link" "core/command-settings"}}
 </header>
 
 {{template "cp_alerts" .}}
@@ -56,23 +57,27 @@
                 <div id="global-settings" class="tab-pane active show">
                     <form method="post" action="/manage/{{.ActiveGuild.ID}}/commands/settings/general" data-async-form>
                         <div class="row">
-                            <div class="col-lg-6">
+                            <div class="col-lg-12">
                                 <div class="form-group">
-                                    <label for="prefix">Command Prefix<br><b>Note: Changing the prefix does not change the flag usage in commands. They will still begin with <code>-</code></b></label>
-                                    <div class="row-lg-6">
-                                        <p id="example-command-usage">Example command usage: <code>{{.CommandPrefix}}rolemenu create &lt;name&gt; -nodm</code></p>
+                                    <label for="prefix">{{if .PrefixCommandsDisabled}} Custom Command Activator {{else}} Command Prefix {{end}}</label>
+                                    <div>
+                                        <p>
+                                            {{if .PrefixCommandsDisabled}}
+                                            Applies to Custom Commmands of trigger type "Command"
+                                            {{else}}
+                                            Note: Changing the prefix does not change the flag usage in commands. They will still begin with <code>{{.CommandPrefix}}</code>
+                                            {{end}}
+                                        </p>
+                                        <p id="example-command-usage" data-example="{{if .PrefixCommandsDisabled}}mycustomcommand{{else}}rolemenu create &lt;name&gt; -dm{{end}}" data-trigger-example="{{if .PrefixCommandsDisabled}}mycustomcommand{{else}}ping{{end}}">Example {{if .PrefixCommandsDisabled}}custom {{end}}command usage: <code>{{.CommandPrefix}}{{if .PrefixCommandsDisabled}}mycustomcommand{{else}}rolemenu create &lt;name&gt; -dm{{end}}</code></p>
                                     </div>
                                     <input type="text" class="form-control" id="prefix" name="Prefix"
                                         value="{{.CommandPrefix}}">
                                 </div>
                             </div>
-                            <div class="col-lg-6">
-                                <i>...dust...</i>
-                            </div>
                         </div>
                         <div class="row mt-4">
                             <div class="col-lg-12">
-                                <button type="submit" class="btn btn-primary btn-lg btn-block">Save Prefix</button>
+                                <button type="submit" class="btn btn-primary btn-lg btn-block">Save {{if .PrefixCommandsDisabled}} Custom Command Activator {{else}} Prefix {{end}}</button>
                             </div>
                         </div>
                     </form>
@@ -130,12 +135,15 @@
 	function handlePrefixChange(prefix) {
 		if (prefix.length === 0) return;
 
-		$("#example-command-usage > code").text(`${prefix}rolemenu create <name> -nodm`);
+		const usage = $("#example-command-usage");
+		const example = usage.attr("data-example");
+		const triggerExample = usage.attr("data-trigger-example");
+		usage.children("code").text(`${prefix}${example}`);
 
 		const existingWarning = $("#trailing-space-warning");
 		if (prefix[prefix.length - 1] === " ") {
 			if (existingWarning.length > 0) return; // don't duplicate warnings
-			addAlert("warning", `You have a trailing space in your command prefix, meaning that while '${prefix}ping' would trigger, '${prefix.trimRight()}ping' would not.`, "trailing-space-warning")
+			addAlert("warning", `You have a trailing space in your command prefix, meaning that while '${prefix}${triggerExample}' would trigger, '${prefix.trimRight()}${triggerExample}' would not.`, "trailing-space-warning")
 		} else if (existingWarning.length) {
 			existingWarning.remove();
 		}
@@ -214,6 +222,7 @@
     </div>
     <div class="form-row">
         {{$desc := "All commands enabled?"}}
+        {{$switchSuffix := print .Override.ID}}{{if .Override.Global}}{{$switchSuffix = "global"}}{{end}}
         {{$commandsEnabled := true}}
         {{if .Override}}{{$commandsEnabled = .Override.CommandsEnabled}}{{end}}
 
@@ -234,8 +243,9 @@
             <div class="input-group mb-3">
                 <span class="input-group-prepend">
                     <span class="input-group-text">
-                        <input type="checkbox" name="AutodeleteTrigger"
+                        <input type="checkbox" class="tgl tgl-flat tgl-sm" name="AutodeleteTrigger" id="autodelete-trigger-{{$switchSuffix}}"
                             {{if .Override.AutodeleteTrigger}}checked{{end}}>
+                        <label for="autodelete-trigger-{{$switchSuffix}}" class="tgl-btn mb-0"></label>
                     </span>
                 </span>
                 <input type="number" min="0" max="2678400" class="form-control" placeholder="Seconds..."
@@ -248,8 +258,9 @@
             <div class="input-group mb-3">
                 <span class="input-group-prepend">
                     <span class="input-group-text">
-                        <input type="checkbox" name="AutodeleteResponse"
+                        <input type="checkbox" class="tgl tgl-flat tgl-sm" name="AutodeleteResponse" id="autodelete-response-{{$switchSuffix}}"
                             {{if .Override.AutodeleteResponse}}checked{{end}}>
+                        <label for="autodelete-response-{{$switchSuffix}}" class="tgl-btn mb-0"></label>
                     </span>
                 </span>
                 <input type="number" min="0" max="2678400" class="form-control" placeholder="Seconds..."
@@ -365,8 +376,9 @@
                         <div class="input-group mb-3">
                             <span class="input-group-prepend">
                                 <span class="input-group-text">
-                                    <input type="checkbox" name="AutodeleteTrigger"
+                                    <input type="checkbox" class="tgl tgl-flat tgl-sm" name="AutodeleteTrigger" id="{{$id}}-autodelete-trigger"
                                         {{if .Override.AutodeleteTrigger}}checked{{end}}>
+                                    <label for="{{$id}}-autodelete-trigger" class="tgl-btn mb-0"></label>
                                 </span>
                             </span>
                             <input type="number" min="0" max="2678400" class="form-control" placeholder="Seconds..."
@@ -379,8 +391,9 @@
                         <div class="input-group mb-3">
                             <span class="input-group-prepend">
                                 <span class="input-group-text">
-                                    <input type="checkbox" name="AutodeleteResponse"
+                                    <input type="checkbox" class="tgl tgl-flat tgl-sm" name="AutodeleteResponse" id="{{$id}}-autodelete-response"
                                         {{if .Override.AutodeleteResponse}}checked{{end}}>
+                                    <label for="{{$id}}-autodelete-response" class="tgl-btn mb-0"></label>
                                 </span>
                             </span>
                             <input type="number" min="0" max="2678400" class="form-control" placeholder="Seconds..."

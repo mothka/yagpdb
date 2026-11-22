@@ -5,6 +5,7 @@
 package template
 
 import (
+	"maps"
 	"reflect"
 	"sync"
 
@@ -18,9 +19,30 @@ type common struct {
 	// We use two maps, one for parsing and one for execution.
 	// This separation makes the API cleaner since it doesn't
 	// expose reflection to the client.
-	muFuncs    sync.RWMutex // protects parseFuncs and execFuncs
+	muFuncs    sync.RWMutex // protects parseFuncs, execFuncs and sharedFuncs
 	parseFuncs FuncMap
 	execFuncs  map[string]reflect.Value
+	// funcs looked up by reference instead of being copied into every template
+	sharedFuncs *SharedFuncMap
+}
+
+// SharedFuncMap holds a FuncMap that has been converted once so it can be
+// attached to many templates without paying the conversion or a map copy each
+// time. It is immutable after construction and safe for concurrent use.
+type SharedFuncMap struct {
+	parse FuncMap
+	exec  map[string]reflect.Value
+}
+
+// NewSharedFuncMap converts funcMap once for reuse across templates.
+func NewSharedFuncMap(funcMap FuncMap) *SharedFuncMap {
+	s := &SharedFuncMap{
+		parse: make(FuncMap, len(funcMap)),
+		exec:  make(map[string]reflect.Value, len(funcMap)),
+	}
+	addValueFuncs(s.exec, funcMap)
+	addFuncs(s.parse, funcMap)
+	return s
 }
 
 // Template is the representation of a parsed template. The *parse.Tree
@@ -33,6 +55,8 @@ type Template struct {
 	leftDelim  string
 	rightDelim string
 	maxOps     int
+
+	maxAllocBytes int
 }
 
 // New allocates a new, undefined template with the given name.
@@ -97,12 +121,9 @@ func (t *Template) Clone() (*Template, error) {
 	}
 	t.muFuncs.RLock()
 	defer t.muFuncs.RUnlock()
-	for k, v := range t.parseFuncs {
-		nt.parseFuncs[k] = v
-	}
-	for k, v := range t.execFuncs {
-		nt.execFuncs[k] = v
-	}
+	maps.Copy(nt.parseFuncs, t.parseFuncs)
+	maps.Copy(nt.execFuncs, t.execFuncs)
+	nt.sharedFuncs = t.sharedFuncs
 	return nt, nil
 }
 
@@ -164,6 +185,14 @@ func (t *Template) MaxOps(ops int) *Template {
 	return t
 }
 
+// MaxAllocBytes caps the total bytes of strings that function calls may produce in one execution,
+// so a template cannot churn through memory faster than the garbage collector can reclaim it.
+func (t *Template) MaxAllocBytes(n int) *Template {
+	t.init()
+	t.maxAllocBytes = n
+	return t
+}
+
 // Funcs adds the elements of the argument map to the template's function map.
 // It must be called before the template is parsed.
 // It panics if a value in the map is not a function with appropriate return
@@ -176,6 +205,16 @@ func (t *Template) Funcs(funcMap FuncMap) *Template {
 	defer t.muFuncs.Unlock()
 	addValueFuncs(t.execFuncs, funcMap)
 	addFuncs(t.parseFuncs, funcMap)
+	return t
+}
+
+// SharedFuncs attaches shared to t. The functions resolve after the template's
+// own funcs and before the builtins. Unlike Funcs it copies nothing.
+func (t *Template) SharedFuncs(shared *SharedFuncMap) *Template {
+	t.init()
+	t.muFuncs.Lock()
+	defer t.muFuncs.Unlock()
+	t.sharedFuncs = shared
 	return t
 }
 
@@ -201,7 +240,11 @@ func (t *Template) Lookup(name string) *Template {
 func (t *Template) Parse(text string) (*Template, error) {
 	t.init()
 	t.muFuncs.RLock()
-	trees, err := parse.Parse(t.name, text, t.leftDelim, t.rightDelim, t.parseFuncs, builtins())
+	var sharedParseFuncs FuncMap
+	if t.sharedFuncs != nil {
+		sharedParseFuncs = t.sharedFuncs.parse
+	}
+	trees, err := parse.Parse(t.name, text, t.leftDelim, t.rightDelim, t.parseFuncs, sharedParseFuncs, builtins())
 	t.muFuncs.RUnlock()
 	if err != nil {
 		return nil, err

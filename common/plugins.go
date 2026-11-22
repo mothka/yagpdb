@@ -34,6 +34,38 @@ func RegisterPlugin(plugin Plugin) {
 	logger.Info("Registered plugin: " + plugin.PluginInfo().Name)
 }
 
+// PluginLoaded reports whether the plugin registered itself, which plugins
+// missing their config do not.
+func PluginLoaded(sysName string) bool {
+	for _, plugin := range Plugins {
+		if plugin.PluginInfo().SysName == sysName {
+			return true
+		}
+	}
+
+	return false
+}
+
+// PluginWithActiveStatus is for plugins that stay registered but can be switched off by config.
+type PluginWithActiveStatus interface {
+	IsActive() bool
+}
+
+// PluginActive reports whether the plugin is loaded and not switched off by its config.
+func PluginActive(sysName string) bool {
+	for _, plugin := range Plugins {
+		if plugin.PluginInfo().SysName != sysName {
+			continue
+		}
+		if cast, ok := plugin.(PluginWithActiveStatus); ok {
+			return cast.IsActive()
+		}
+		return true
+	}
+
+	return false
+}
+
 // PluginWithCommonRun is for plugins that include a function that's always run, no matter if its the webserver frontend, bot or whatever
 type PluginWithCommonRun interface {
 	CommonRun()

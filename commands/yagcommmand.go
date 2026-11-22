@@ -148,6 +148,16 @@ type YAGCommand struct {
 	// then this returns the roles that CAN'T use the command
 	RolesRunFunc RolesRunFunc
 
+	// Names this command was registered under before a rename or a move into a
+	// container. Per command overrides saved against the old name keep applying.
+	// AddRootAliases fills this in automatically.
+	LegacyOverrideNames []string
+
+	// Set by AddContainerCommand. Overrides resolve against this rather than the
+	// chain the command was invoked through, so a command reachable both as
+	// "rep give" and as the root alias "giverep" resolves to one name.
+	containerName string
+
 	slashCommandID int64
 
 	IsResponseEphemeral bool
@@ -176,7 +186,7 @@ var metricsExcecutedCommands = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "Commands the bot executed",
 }, []string{"name", "trigger_type"})
 
-func (yc *YAGCommand) Run(data *dcmd.Data) (interface{}, error) {
+func (yc *YAGCommand) Run(data *dcmd.Data) (any, error) {
 	if data.TriggerType == dcmd.TriggerTypeSlashCommands && data.SlashCommandTriggerData.Interaction.Type == discordgo.InteractionApplicationCommandAutocomplete {
 		for _, v := range data.SlashCommandTriggerData.Options {
 			if !v.Focused {
@@ -309,7 +319,7 @@ func (yc *YAGCommand) humanizeError(err error) string {
 			if t.Message.Message == "Unknown Message" {
 				return "The bot was not able to perform the action, Discord responded with: " + t.Message.Message + ". Please be sure you ran the command in the same channel as the message."
 			} else if t.Response != nil && t.Response.StatusCode == 403 {
-				return "The bot permissions has been incorrectly set up on this server for it to run this command: " + t.Message.Message
+				return "I am missing permissions to run this command, Discord responded with: " + t.Message.Message
 			}
 
 			return "The bot was not able to perform the action, discord responded with: " + t.Message.Message
@@ -320,7 +330,7 @@ func (yc *YAGCommand) humanizeError(err error) string {
 }
 
 // PostCommandExecuted sends the response and handles the trigger and response deletions
-func (yc *YAGCommand) PostCommandExecuted(settings *CommandSettings, cmdData *dcmd.Data, resp interface{}, err error) {
+func (yc *YAGCommand) PostCommandExecuted(settings *CommandSettings, cmdData *dcmd.Data, resp any, err error) {
 	if err != nil {
 		yc.Logger(cmdData).WithError(err).Error("Command returned error")
 	}
@@ -429,25 +439,32 @@ type CanExecuteError struct {
 }
 
 // checks if the specified user can execute the command, and if so returns the settings for said command
-func (yc *YAGCommand) checkCanExecuteCommand(data *dcmd.Data) (canExecute bool, resp *CanExecuteError, settings *CommandSettings, err error) {
+// commandSettings resolves the guild overrides on their own, ahead of the rest
+// of the checks. A slash command has three seconds to be acknowledged, and
+// checkCanExecuteCommand can block well past that fetching the bot member, so
+// the interaction has to be deferred in between the two.
+func (yc *YAGCommand) commandSettings(data *dcmd.Data) (*CommandSettings, error) {
+	if data.GuildData == nil {
+		return &CommandSettings{Enabled: true}, nil
+	}
+
+	settings, err := yc.GetSettings(data.ContainerChain, data.GuildData.CS, data.GuildData.GS)
+	if err != nil {
+		return nil, errors.WithMessage(err, "cs.GetSettings")
+	}
+
+	return settings, nil
+}
+
+func (yc *YAGCommand) checkCanExecuteCommand(data *dcmd.Data, settings *CommandSettings) (canExecute bool, resp *CanExecuteError, err error) {
 	// Check guild specific settings if not triggered from a DM
 	if data.GuildData != nil {
 		guild := data.GuildData.GS
 
 		if data.TriggerType != dcmd.TriggerTypeSlashCommands {
 			if hasPerms, _ := bot.BotHasPermissionGS(guild, data.ChannelID, discordgo.PermissionViewChannel|discordgo.PermissionSendMessages); !hasPerms {
-				return false, nil, nil, nil
+				return false, nil, nil
 			}
-		}
-
-		settings, err = yc.GetSettings(data.ContainerChain, data.GuildData.CS, guild)
-		if err != nil {
-			resp = &CanExecuteError{
-				Type:    ReasonError,
-				Message: "Failed retrieving cs.settings",
-			}
-
-			return false, resp, settings, errors.WithMessage(err, "cs.GetSettings")
 		}
 
 		if !settings.Enabled {
@@ -456,30 +473,26 @@ func (yc *YAGCommand) checkCanExecuteCommand(data *dcmd.Data) (canExecute bool, 
 				Message: "Command is disabled in this channel by server admins",
 			}
 
-			return false, resp, settings, nil
+			return false, resp, nil
 		}
 
 		member := data.GuildData.MS
 		guildRoles := roleNames(guild)
 
 		if missingWhitelistErr := checkWhitelistRoles(guildRoles, settings.RequiredRoles, data); missingWhitelistErr != nil {
-			return false, missingWhitelistErr, settings, nil
+			return false, missingWhitelistErr, nil
 		}
 
 		if blacklistErr := checkBlacklistRoles(guildRoles, settings.IgnoreRoles, data); blacklistErr != nil {
-			return false, blacklistErr, settings, nil
+			return false, blacklistErr, nil
 		}
 
 		if userPermsErr := yc.checkRequiredMemberPerms(guild, member, data.ChannelID); userPermsErr != nil {
-			return false, userPermsErr, settings, nil
+			return false, userPermsErr, nil
 		}
 
-		if userPermsErr := yc.checkRequiredBotPerms(guild, data.ChannelID); userPermsErr != nil {
-			return false, userPermsErr, settings, nil
-		}
-	} else {
-		settings = &CommandSettings{
-			Enabled: true,
+		if userPermsErr := yc.checkRequiredBotPerms(guild, data); userPermsErr != nil {
+			return false, userPermsErr, nil
 		}
 	}
 
@@ -500,11 +513,11 @@ func (yc *YAGCommand) checkCanExecuteCommand(data *dcmd.Data) (canExecute bool, 
 			Type:    ReasonCooldown,
 			Message: "Command is on cooldown, try again in " + strconv.Itoa(cdLeft) + " seconds",
 		}
-		return false, resp, settings, nil
+		return false, resp, nil
 	}
 
 	// If we got here then we can execute the command
-	return true, nil, settings, nil
+	return true, nil, nil
 }
 
 func checkWhitelistRoles(guildRoles map[int64]string, whitelistRoles []int64, data *dcmd.Data) *CanExecuteError {
@@ -619,13 +632,13 @@ func (yc *YAGCommand) checkRequiredMemberPerms(gs *dstate.GuildSet, ms *dstate.M
 	}
 }
 
-func (yc *YAGCommand) checkRequiredBotPerms(gs *dstate.GuildSet, channelID int64) *CanExecuteError {
+func (yc *YAGCommand) checkRequiredBotPerms(gs *dstate.GuildSet, data *dcmd.Data) *CanExecuteError {
 	// This command has permission sets required, if the user has one of them then allow this command to be used
 	if len(yc.RequireBotPerms) < 1 {
 		return nil
 	}
 
-	perms, err := bot.BotPermissions(gs, channelID)
+	perms, err := botPermissionsIn(gs, data)
 	if err != nil {
 		return &CanExecuteError{
 			Type:    ReasonError,
@@ -661,8 +674,19 @@ OUTER:
 
 	return &CanExecuteError{
 		Type:    ReasonBotMissingPerms,
-		Message: "The bot needs at least one of the following permissions to run this command: " + strings.Join(humanizedPerms, " or "),
+		Message: "I am missing the following permissions in this channel to run this command: " + strings.Join(humanizedPerms, " or "),
 	}
+}
+
+// interactions carry the bot's permissions in the channel, which also covers channels the bot cannot view and are not in state
+func botPermissionsIn(gs *dstate.GuildSet, data *dcmd.Data) (int64, error) {
+	if data.TriggerType == dcmd.TriggerTypeSlashCommands {
+		if perms := data.SlashCommandTriggerData.Interaction.AppPermissions; perms != 0 {
+			return perms, nil
+		}
+	}
+
+	return bot.BotPermissions(gs, data.ChannelID)
 }
 
 func roleNames(gs *dstate.GuildSet) map[int64]string {
@@ -780,27 +804,37 @@ func (yc *YAGCommand) GetSettingsWithLoadedOverrides(containerChain []*dcmd.Cont
 		}
 	}
 
-	cmdFullName := yc.Name
-	if len(containerChain) > 1 {
-		lastContainer := containerChain[len(containerChain)-1]
-		cmdFullName = lastContainer.Names[0] + " " + cmdFullName
-	}
+	name := yc.overrideName(containerChain)
 
 	// Assign the global settings, if existing
 	if global != nil {
-		yc.fillSettings(cmdFullName, global, settings)
+		yc.fillSettings(name, global, settings)
 	}
 
 	// Assign the channel override, if existing
 	if channelOverride != nil {
-		yc.fillSettings(cmdFullName, channelOverride, settings)
+		yc.fillSettings(name, channelOverride, settings)
 	}
 
 	return
 }
 
+// overrideName returns the single name per command overrides are recorded
+// under. Stored names are resolved to this through CanonicalOverrideName rather
+// than comparing against every alias.
+func (yc *YAGCommand) overrideName(containerChain []*dcmd.Container) string {
+	switch {
+	case yc.containerName != "":
+		return yc.containerName + " " + yc.Name
+	case len(containerChain) > 1:
+		return containerChain[len(containerChain)-1].Names[0] + " " + yc.Name
+	default:
+		return yc.Name
+	}
+}
+
 // Fills the command settings from a channel override, and if a matching command override is found, the command override
-func (cs *YAGCommand) fillSettings(cmdFullName string, override *models.CommandsChannelsOverride, settings *CommandSettings) {
+func (cs *YAGCommand) fillSettings(name string, override *models.CommandsChannelsOverride, settings *CommandSettings) {
 	settings.Enabled = override.CommandsEnabled
 	settings.AlwaysEphemeral = override.AlwaysEphemeral
 
@@ -812,25 +846,36 @@ func (cs *YAGCommand) fillSettings(cmdFullName string, override *models.Commands
 	settings.DelResponseDelay = override.AutodeleteResponseDelay
 	settings.DelTriggerDelay = override.AutodeleteTriggerDelay
 
-OUTER:
 	for _, cmdOverride := range override.R.CommandsCommandOverrides {
-		for _, cmd := range cmdOverride.Commands {
-			if strings.EqualFold(cmd, cmdFullName) {
-				settings.Enabled = cmdOverride.CommandsEnabled
-				settings.AlwaysEphemeral = cmdOverride.AlwaysEphemeral
+		if !overrideCoversCommand(cmdOverride.Commands, name) {
+			continue
+		}
 
-				settings.IgnoreRoles = cmdOverride.IgnoreRoles
-				settings.RequiredRoles = cmdOverride.RequireRoles
+		settings.Enabled = cmdOverride.CommandsEnabled
+		settings.AlwaysEphemeral = cmdOverride.AlwaysEphemeral
 
-				settings.DelResponse = cmdOverride.AutodeleteResponse
-				settings.DelTrigger = cmdOverride.AutodeleteTrigger
-				settings.DelResponseDelay = cmdOverride.AutodeleteResponseDelay
-				settings.DelTriggerDelay = cmdOverride.AutodeleteTriggerDelay
+		settings.IgnoreRoles = cmdOverride.IgnoreRoles
+		settings.RequiredRoles = cmdOverride.RequireRoles
 
-				break OUTER
-			}
+		settings.DelResponse = cmdOverride.AutodeleteResponse
+		settings.DelTrigger = cmdOverride.AutodeleteTrigger
+		settings.DelResponseDelay = cmdOverride.AutodeleteResponseDelay
+		settings.DelTriggerDelay = cmdOverride.AutodeleteTriggerDelay
+
+		return
+	}
+}
+
+// overrideCoversCommand reports whether a stored override applies to the
+// command, resolving old names through the alias map as it goes.
+func overrideCoversCommand(stored []string, name string) bool {
+	for _, storedName := range stored {
+		if strings.EqualFold(CanonicalOverrideName(storedName), name) {
+			return true
 		}
 	}
+
+	return false
 }
 
 // LongestCooldownLeft returns the longest cooldown for this command, either user scoped or guild scoped
@@ -939,9 +984,28 @@ func (yc *YAGCommand) Logger(data *dcmd.Data) *logrus.Entry {
 	return l
 }
 
+// CanonicalName reports the path this command is invoked by. Commands moved into
+// a container keep root level aliases for backwards compatibility, and those
+// aliases have no slash command of their own, so help must name the container
+// form or it cannot resolve a command mention.
+func (yc *YAGCommand) CanonicalName() string {
+	// Empty means "no opinion": help then uses the container the command was
+	// found in, which is correct for everything registered straight into a
+	// container rather than moved with AddContainerCommand.
+	if yc.containerName == "" {
+		return ""
+	}
+
+	return yc.containerName + " " + yc.Name
+}
+
 func (yc *YAGCommand) GetTrigger() *dcmd.Trigger {
 	trigger := dcmd.NewTrigger(yc.Name, yc.Aliases...).SetEnableInDM(yc.RunInDM).SetEnableInGuildChannels(true)
-	trigger = trigger.SetHideFromHelp(yc.HideFromHelp)
+	// A command kept off the commands page is not one users are meant to browse,
+	// so it stays out of the help listing, but "help <name>" still explains it.
+	// HideFromHelp is the stronger form and hides it from both.
+	trigger = trigger.SetHideFromHelp(yc.HideFromHelp || yc.HideFromCommandsPage)
+	trigger = trigger.SetHideFromTargettedHelp(yc.HideFromHelp)
 	if len(yc.Middlewares) > 0 {
 		trigger = trigger.SetMiddlewares(yc.Middlewares...)
 	}
@@ -1040,6 +1104,85 @@ func (yc *YAGCommand) FindNameFromContainerChain(cc []*dcmd.Container) string {
 	}
 
 	return name + yc.Name
+}
+
+// overrideNameAliases maps a name a per command override may have been saved
+// under to the name that command goes by now. Commands moved into a container
+// kept their old root level names as aliases, so saved overrides still name
+// them the old way. Built once by BuildOverrideNameAliases after every command
+// has registered, and read only afterwards.
+var overrideNameAliases map[string]string
+
+// BuildOverrideNameAliases must run after all commands are registered.
+func BuildOverrideNameAliases() {
+	aliases := make(map[string]string)
+
+	for _, registered := range CommandSystem.Root.Commands {
+		cmd, ok := registered.Command.(*YAGCommand)
+		if !ok {
+			continue
+		}
+
+		canonical := cmd.CanonicalName()
+		if canonical == "" {
+			continue
+		}
+
+		for _, old := range append([]string{cmd.Name}, cmd.LegacyOverrideNames...) {
+			if old == "" || strings.EqualFold(old, canonical) {
+				continue
+			}
+			aliases[strings.ToLower(old)] = canonical
+		}
+	}
+
+	overrideNameAliases = aliases
+}
+
+// CanonicalOverrideName resolves a stored override name to the command's
+// current name, leaving names it does not know about alone.
+func CanonicalOverrideName(stored string) string {
+	if canonical, ok := overrideNameAliases[strings.ToLower(stored)]; ok {
+		return canonical
+	}
+
+	return stored
+}
+
+// NormalizeOverrideCommandNames rewrites loaded overrides in memory so the
+// commands page shows each one under the name it now lists. Nothing is written
+// back here; saving the page stores the new name and drops the old one.
+func NormalizeOverrideCommandNames(channelOverrides []*models.CommandsChannelsOverride) {
+	for _, channelOverride := range channelOverrides {
+		if channelOverride.R == nil {
+			continue
+		}
+
+		for _, cmdOverride := range channelOverride.R.CommandsCommandOverrides {
+			cmdOverride.Commands = CanonicalOverrideNames(cmdOverride.Commands)
+		}
+	}
+}
+
+// CanonicalOverrideNames resolves a stored list to current names, dropping the
+// duplicate left behind when two old names collapse onto the same command.
+func CanonicalOverrideNames(stored []string) []string {
+	renamed := make([]string, 0, len(stored))
+	seen := make(map[string]bool, len(stored))
+
+	for _, name := range stored {
+		name = CanonicalOverrideName(name)
+
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		renamed = append(renamed, name)
+	}
+
+	return renamed
 }
 
 // GetAllOverrides returns all channel overrides and ensures the global override with atleast a default is present

@@ -19,15 +19,53 @@ import (
 	"github.com/botlabs-gg/yagpdb/v2/lib/discordgo"
 	"github.com/botlabs-gg/yagpdb/v2/lib/dstate"
 	"github.com/botlabs-gg/yagpdb/v2/safebrowsing"
+	"github.com/botlabs-gg/yagpdb/v2/serverpreview"
 )
 
 var SanitizeTextName = "Also match visually similar characters such as \"Ĥéĺĺó\""
 
+const (
+	IncludeExtraTextName = "Check extra text"
+	IncludeExtraTextHelp = "Also checks link previews and other embeds (title, description, fields, author, footer and link), " +
+		"poll questions and answers, and the text, button labels and links in message components. " +
+		"Embeds and components in forwarded messages are included."
+)
+
+func includeExtraTextSetting() *SettingDef {
+	return &SettingDef{
+		Name:    IncludeExtraTextName,
+		Help:    IncludeExtraTextHelp,
+		Key:     "IncludeExtraText",
+		Kind:    SettingTypeBool,
+		Default: false,
+	}
+}
+
+type IncludeExtraTextTriggerData struct {
+	IncludeExtraText bool
+}
+
+func mergeIncludeExtraText(data []any) any {
+	merged := &IncludeExtraTextTriggerData{}
+	for _, v := range data {
+		merged.IncludeExtraText = merged.IncludeExtraText || v.(*IncludeExtraTextTriggerData).IncludeExtraText
+	}
+	return merged
+}
+
+func messageTexts(m *discordgo.Message, includeExtraText bool) []string {
+	if includeExtraText {
+		return m.GetAllTextContents()
+	}
+	return m.GetMessageContents()
+}
+
 /////////////////////////////////////////////////////////////
 
 type BaseRegexTriggerData struct {
-	Regex        string `valid:",1,250"`
-	SanitizeText bool
+	Regex            string `valid:",1,250"`
+	SanitizeText     bool
+	IncludeExtraText bool
 }
 
 type BaseRegexTrigger struct {
@@ -38,7 +76,7 @@ func (r BaseRegexTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (r BaseRegexTrigger) DataType() interface{} {
+func (r BaseRegexTrigger) DataType() any {
 	return &BaseRegexTriggerData{}
 }
 
@@ -74,7 +112,7 @@ func (mc *MentionsTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (mc *MentionsTrigger) DataType() interface{} {
+func (mc *MentionsTrigger) DataType() any {
 	return &MentionsTriggerData{}
 }
 
@@ -106,7 +144,7 @@ func (mc *MentionsTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.C
 	return false, nil
 }
 
-func (mc *MentionsTrigger) MergeDuplicates(data []interface{}) interface{} {
+func (mc *MentionsTrigger) MergeDuplicates(data []any) any {
 	return data[0] // no point in having duplicates of this
 }
 
@@ -120,8 +158,8 @@ func (alc *AnyLinkTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (alc *AnyLinkTrigger) DataType() interface{} {
-	return nil
+func (alc *AnyLinkTrigger) DataType() any {
+	return &IncludeExtraTextTriggerData{}
 }
 
 func (alc *AnyLinkTrigger) Name() (name string) {
@@ -133,11 +171,12 @@ func (alc *AnyLinkTrigger) Description() (description string) {
 }
 
 func (alc *AnyLinkTrigger) UserSettings() []*SettingDef {
-	return []*SettingDef{}
+	return []*SettingDef{includeExtraTextSetting()}
 }
 
 func (alc *AnyLinkTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.ChannelState, m *discordgo.Message) (bool, error) {
-	for _, content := range m.GetMessageContents() {
+	dataCast := triggerCtx.Data.(*IncludeExtraTextTriggerData)
+	for _, content := range messageTexts(m, dataCast.IncludeExtraText) {
 		content = confusables.NormalizeQueryEncodedText(content)
 		if common.LinkRegex.MatchString(common.ForwardSlashReplacer.Replace(content)) {
 			return true, nil
@@ -147,8 +186,8 @@ func (alc *AnyLinkTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.C
 
 }
 
-func (alc *AnyLinkTrigger) MergeDuplicates(data []interface{}) interface{} {
-	return data[0] // no point in having duplicates of this
+func (alc *AnyLinkTrigger) MergeDuplicates(data []any) any {
+	return mergeIncludeExtraText(data)
 }
 
 /////////////////////////////////////////////////////////////
@@ -159,15 +198,16 @@ type WordListTrigger struct {
 	Blacklist bool
 }
 type WorldListTriggerData struct {
-	ListID       int64
-	SanitizeText bool
+	ListID           int64
+	SanitizeText     bool
+	IncludeExtraText bool
 }
 
 func (wl *WordListTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (wl *WordListTrigger) DataType() interface{} {
+func (wl *WordListTrigger) DataType() any {
 	return &WorldListTriggerData{}
 }
 
@@ -200,6 +240,7 @@ func (wl *WordListTrigger) UserSettings() []*SettingDef {
 			Kind:    SettingTypeBool,
 			Default: false,
 		},
+		includeExtraTextSetting(),
 	}
 }
 
@@ -211,7 +252,7 @@ func (wl *WordListTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.C
 		return false, nil
 	}
 	var messageFields []string
-	for _, content := range m.GetMessageContents() {
+	for _, content := range messageTexts(m, dataCast.IncludeExtraText) {
 		content := PrepareMessageForWordCheck(content)
 		messageFields = append(messageFields, strings.Fields(content)...)
 		if dataCast.SanitizeText {
@@ -251,14 +292,15 @@ type DomainTrigger struct {
 	Blacklist bool
 }
 type DomainTriggerData struct {
-	ListID int64
+	ListID           int64
+	IncludeExtraText bool
 }
 
 func (dt *DomainTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (dt *DomainTrigger) DataType() interface{} {
+func (dt *DomainTrigger) DataType() any {
 	return &DomainTriggerData{}
 }
 
@@ -285,6 +327,7 @@ func (dt *DomainTrigger) UserSettings() []*SettingDef {
 			Key:  "ListID",
 			Kind: SettingTypeList,
 		},
+		includeExtraTextSetting(),
 	}
 }
 
@@ -297,7 +340,7 @@ func (dt *DomainTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.Cha
 	}
 
 	var matches []string
-	for _, content := range m.GetMessageContents() {
+	for _, content := range messageTexts(m, dataCast.IncludeExtraText) {
 		content = confusables.NormalizeQueryEncodedText(content)
 		snapshotMatches := common.LinkRegex.FindAllString(common.ForwardSlashReplacer.Replace(content), -1)
 		matches = append(matches, snapshotMatches...)
@@ -367,7 +410,7 @@ func (vt *ViolationsTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (vt *ViolationsTrigger) DataType() interface{} {
+func (vt *ViolationsTrigger) DataType() any {
 	return &ViolationsTriggerData{}
 }
 
@@ -410,7 +453,7 @@ func (vt *ViolationsTrigger) UserSettings() []*SettingDef {
 	}
 }
 
-func (vt *ViolationsTrigger) CheckUser(ctxData *TriggeredRuleData, violations []*models.AutomodViolation, settings interface{}, triggeredOnHigher bool) (isAffected bool, err error) {
+func (vt *ViolationsTrigger) CheckUser(ctxData *TriggeredRuleData, violations []*models.AutomodViolation, settings any, triggeredOnHigher bool) (isAffected bool, err error) {
 	settingsCast := settings.(*ViolationsTriggerData)
 	if triggeredOnHigher && settingsCast.IgnoreIfLesser {
 		return false, nil
@@ -452,7 +495,7 @@ func (caps *AllCapsTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (caps *AllCapsTrigger) DataType() interface{} {
+func (caps *AllCapsTrigger) DataType() any {
 	return &AllCapsTriggerData{}
 }
 
@@ -492,18 +535,17 @@ func (caps *AllCapsTrigger) UserSettings() []*SettingDef {
 func (caps *AllCapsTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.ChannelState, m *discordgo.Message) (bool, error) {
 	dataCast := triggerCtx.Data.(*AllCapsTriggerData)
 
-	if len(m.Content) < dataCast.MinLength {
+	messageContent := strings.Join(m.GetMessageContents(), " ")
+	if len(messageContent) < dataCast.MinLength {
 		return false, nil
 	}
-
-	totalCapitalisableChars := 0
-	numCaps := 0
-
-	messageContent := m.Content
 
 	if dataCast.SanitizeText {
 		messageContent = confusables.SanitizeText(messageContent)
 	}
+
+	totalCapitalisableChars := 0
+	numCaps := 0
 
 	// count the number of upper case characters, note that this dosen't include other characters such as punctuation
 	for _, r := range messageContent {
@@ -529,7 +571,7 @@ func (caps *AllCapsTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.
 	return false, nil
 }
 
-func (caps *AllCapsTrigger) MergeDuplicates(data []interface{}) interface{} {
+func (caps *AllCapsTrigger) MergeDuplicates(data []any) any {
 	return data[0] // no point in having duplicates of this
 }
 
@@ -543,8 +585,8 @@ func (inv *ServerInviteTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (inv *ServerInviteTrigger) DataType() interface{} {
-	return nil
+func (inv *ServerInviteTrigger) DataType() any {
+	return &IncludeExtraTextTriggerData{}
 }
 
 func (inv *ServerInviteTrigger) Name() string {
@@ -552,20 +594,20 @@ func (inv *ServerInviteTrigger) Name() string {
 }
 
 func (inv *ServerInviteTrigger) Description() string {
-	return "Triggers on messages containing invites to other servers, also includes some 3rd party server lists."
+	return "Triggers on messages containing invites to other servers, also includes some 3rd party server lists and server preview links."
 }
 
 func (inv *ServerInviteTrigger) UserSettings() []*SettingDef {
-	return []*SettingDef{}
+	return []*SettingDef{includeExtraTextSetting()}
 }
 
 func (inv *ServerInviteTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.ChannelState, m *discordgo.Message) (bool, error) {
-	containsBadInvited := automod_legacy.CheckMessageForBadInvites(m)
-	return containsBadInvited, nil
+	dataCast := triggerCtx.Data.(*IncludeExtraTextTriggerData)
+	return automod_legacy.CheckMessageForBadInvites(m, dataCast.IncludeExtraText), nil
 }
 
-func (inv *ServerInviteTrigger) MergeDuplicates(data []interface{}) interface{} {
-	return data[0] // no point in having duplicates of this
+func (inv *ServerInviteTrigger) MergeDuplicates(data []any) any {
+	return mergeIncludeExtraText(data)
 }
 
 /////////////////////////////////////////////////////////////
@@ -582,8 +624,8 @@ func (a *AntiPhishingLinkTrigger) Name() string {
 	return "Flagged Scam links"
 }
 
-func (a *AntiPhishingLinkTrigger) DataType() interface{} {
-	return nil
+func (a *AntiPhishingLinkTrigger) DataType() any {
+	return &IncludeExtraTextTriggerData{}
 }
 
 func (a *AntiPhishingLinkTrigger) Description() string {
@@ -591,11 +633,12 @@ func (a *AntiPhishingLinkTrigger) Description() string {
 }
 
 func (a *AntiPhishingLinkTrigger) UserSettings() []*SettingDef {
-	return []*SettingDef{}
+	return []*SettingDef{includeExtraTextSetting()}
 }
 
 func (a *AntiPhishingLinkTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.ChannelState, m *discordgo.Message) (bool, error) {
-	for _, content := range m.GetMessageContents() {
+	dataCast := triggerCtx.Data.(*IncludeExtraTextTriggerData)
+	for _, content := range messageTexts(m, dataCast.IncludeExtraText) {
 		badDomain, err := antiphishing.CheckMessageForPhishingDomains(common.ForwardSlashReplacer.Replace(content))
 		if err != nil {
 			logger.WithError(err).Error("Failed to check url ")
@@ -610,6 +653,103 @@ func (a *AntiPhishingLinkTrigger) CheckMessage(triggerCtx *TriggerContext, cs *d
 
 /////////////////////////////////////////////////////////////
 
+var _ MessageTrigger = (*FlaggedMediaTrigger)(nil)
+
+type FlaggedMediaTrigger struct{}
+
+type FlaggedMediaTriggerData struct {
+	Explicit bool
+	Gore     bool
+	SelfHarm bool
+}
+
+func (f *FlaggedMediaTrigger) Kind() RulePartType {
+	return RulePartTrigger
+}
+
+func (f *FlaggedMediaTrigger) Name() string {
+	return "Message Contains Media Flagged by Discord"
+}
+
+func (f *FlaggedMediaTrigger) DataType() any {
+	return &FlaggedMediaTriggerData{}
+}
+
+func (f *FlaggedMediaTrigger) Description() string {
+	return "Triggers on messages with attachments or embeds that Discord's content scanning flagged, which can happen shortly after the message was sent"
+}
+
+func (f *FlaggedMediaTrigger) UserSettings() []*SettingDef {
+	return []*SettingDef{
+		{
+			Name:    "Explicit content",
+			Key:     "Explicit",
+			Kind:    SettingTypeBool,
+			Default: true,
+		},
+		{
+			Name:    "Gore",
+			Key:     "Gore",
+			Kind:    SettingTypeBool,
+			Default: true,
+		},
+		{
+			Name:    "Self-harm",
+			Key:     "SelfHarm",
+			Kind:    SettingTypeBool,
+			Default: true,
+		},
+	}
+}
+
+func (f *FlaggedMediaTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.ChannelState, m *discordgo.Message) (bool, error) {
+	dataCast := triggerCtx.Data.(*FlaggedMediaTriggerData)
+
+	var attachmentFlags discordgo.MessageAttachmentFlags
+	var embedFlags discordgo.MessageEmbedFlags
+	if dataCast.Explicit {
+		attachmentFlags |= discordgo.MessageAttachmentFlagContainsExplicitContent
+		embedFlags |= discordgo.MessageEmbedFlagContainsExplicitContent
+	}
+	if dataCast.Gore {
+		attachmentFlags |= discordgo.MessageAttachmentFlagContainsGoreContent
+		embedFlags |= discordgo.MessageEmbedFlagContainsGoreContent
+	}
+	if dataCast.SelfHarm {
+		attachmentFlags |= discordgo.MessageAttachmentFlagContainsSelfHarmContent
+		embedFlags |= discordgo.MessageEmbedFlagContainsSelfHarmContent
+	}
+
+	for _, v := range m.GetMessageAttachments() {
+		if v.Flags&attachmentFlags != 0 {
+			return true, nil
+		}
+	}
+
+	for _, v := range m.GetMessageEmbeds() {
+		if v.Flags&embedFlags != 0 {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// MergeDuplicates checks for every kind of content picked in any of the duplicates
+func (f *FlaggedMediaTrigger) MergeDuplicates(data []any) any {
+	merged := &FlaggedMediaTriggerData{}
+	for _, v := range data {
+		d := v.(*FlaggedMediaTriggerData)
+		merged.Explicit = merged.Explicit || d.Explicit
+		merged.Gore = merged.Gore || d.Gore
+		merged.SelfHarm = merged.SelfHarm || d.SelfHarm
+	}
+
+	return merged
+}
+
+/////////////////////////////////////////////////////////////
+
 var _ MessageTrigger = (*GoogleSafeBrowsingTrigger)(nil)
 
 type GoogleSafeBrowsingTrigger struct{}
@@ -618,8 +758,8 @@ func (g *GoogleSafeBrowsingTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (g *GoogleSafeBrowsingTrigger) DataType() interface{} {
-	return nil
+func (g *GoogleSafeBrowsingTrigger) DataType() any {
+	return &IncludeExtraTextTriggerData{}
 }
 
 func (g *GoogleSafeBrowsingTrigger) Name() string {
@@ -631,11 +771,12 @@ func (g *GoogleSafeBrowsingTrigger) Description() string {
 }
 
 func (g *GoogleSafeBrowsingTrigger) UserSettings() []*SettingDef {
-	return []*SettingDef{}
+	return []*SettingDef{includeExtraTextSetting()}
 }
 
 func (g *GoogleSafeBrowsingTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.ChannelState, m *discordgo.Message) (bool, error) {
-	for _, input := range m.GetMessageContents() {
+	dataCast := triggerCtx.Data.(*IncludeExtraTextTriggerData)
+	for _, input := range messageTexts(m, dataCast.IncludeExtraText) {
 		threat, err := safebrowsing.CheckString(common.ForwardSlashReplacer.Replace(input))
 		if err != nil {
 			logger.WithError(err).Error("Failed checking urls against google safebrowser")
@@ -648,8 +789,8 @@ func (g *GoogleSafeBrowsingTrigger) CheckMessage(triggerCtx *TriggerContext, cs 
 	return false, nil
 }
 
-func (g *GoogleSafeBrowsingTrigger) MergeDuplicates(data []interface{}) interface{} {
-	return data[0] // no point in having duplicates of this
+func (g *GoogleSafeBrowsingTrigger) MergeDuplicates(data []any) any {
+	return mergeIncludeExtraText(data)
 }
 
 /////////////////////////////////////////////////////////////
@@ -673,7 +814,7 @@ func (s *SlowmodeTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (s *SlowmodeTrigger) DataType() interface{} {
+func (s *SlowmodeTrigger) DataType() any {
 	return &SlowmodeTriggerData{}
 }
 
@@ -833,7 +974,7 @@ func (s *SlowmodeTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.Ch
 	return false, nil
 }
 
-func (s *SlowmodeTrigger) MergeDuplicates(data []interface{}) interface{} {
+func (s *SlowmodeTrigger) MergeDuplicates(data []any) any {
 	return data[0] // no point in having duplicates of this
 }
 
@@ -855,7 +996,7 @@ func (mt *MultiMsgMentionTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (mt *MultiMsgMentionTrigger) DataType() interface{} {
+func (mt *MultiMsgMentionTrigger) DataType() any {
 	return &MultiMsgMentionTriggerData{}
 }
 
@@ -941,7 +1082,7 @@ func (mt *MultiMsgMentionTrigger) CheckMessage(triggerCtx *TriggerContext, cs *d
 	return false, nil
 }
 
-func (mt *MultiMsgMentionTrigger) MergeDuplicates(data []interface{}) interface{} {
+func (mt *MultiMsgMentionTrigger) MergeDuplicates(data []any) any {
 	return data[0] // no point in having duplicates of this
 }
 
@@ -969,10 +1110,18 @@ func (r *MessageRegexTrigger) Description() string {
 	return "Triggers when a message matches the provided regex"
 }
 
+func (r *MessageRegexTrigger) UserSettings() []*SettingDef {
+	settings := r.BaseRegexTrigger.UserSettings()
+	if r.BaseRegexTrigger.Inverse {
+		return settings
+	}
+	return append(settings, includeExtraTextSetting())
+}
+
 func (r *MessageRegexTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.ChannelState, m *discordgo.Message) (bool, error) {
 	dataCast := triggerCtx.Data.(*BaseRegexTriggerData)
 
-	item, err := RegexCache.Fetch(dataCast.Regex, time.Minute*10, func() (interface{}, error) {
+	item, err := RegexCache.Fetch(dataCast.Regex, time.Minute*10, func() (any, error) {
 		re, err := regexp.Compile(dataCast.Regex)
 		if err != nil {
 			return nil, err
@@ -987,13 +1136,14 @@ func (r *MessageRegexTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstat
 
 	re := item.Value().(*regexp.Regexp)
 
-	for _, content := range m.GetMessageContents() {
+	includeExtraText := dataCast.IncludeExtraText && !r.BaseRegexTrigger.Inverse
+	for _, content := range messageTexts(m, includeExtraText) {
 		var sanitizedContent string
 		if dataCast.SanitizeText {
 			sanitizedContent = confusables.SanitizeText(content)
 		}
 
-		if re.MatchString(m.Content) || (dataCast.SanitizeText && re.MatchString(sanitizedContent)) {
+		if re.MatchString(content) || (dataCast.SanitizeText && re.MatchString(sanitizedContent)) {
 			if r.BaseRegexTrigger.Inverse {
 				continue
 			}
@@ -1025,7 +1175,7 @@ func (spam *SpamTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (spam *SpamTrigger) DataType() interface{} {
+func (spam *SpamTrigger) DataType() any {
 	return &SpamTriggerData{}
 }
 
@@ -1073,8 +1223,9 @@ func (spam *SpamTrigger) UserSettings() []*SettingDef {
 func (spam *SpamTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.ChannelState, m *discordgo.Message) (bool, error) {
 
 	settingsCast := triggerCtx.Data.(*SpamTriggerData)
+	messagecontent := strings.Join(m.GetMessageContents(), "")
 
-	mToCheckAgainst := strings.TrimSpace(strings.ToLower(m.Content))
+	mToCheckAgainst := strings.TrimSpace(strings.ToLower(messagecontent))
 	totalAttachments := len(m.GetMessageAttachments())
 
 	count := 1
@@ -1108,7 +1259,8 @@ func (spam *SpamTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.Cha
 			break // attachment count don't match
 		}
 
-		contentStripped := strings.TrimSpace(v.Content)
+		content := strings.Join(v.GetMessageContents(), "")
+		contentStripped := strings.TrimSpace(content)
 		contentLowered := strings.ToLower(contentStripped)
 
 		if contentLowered == mToCheckAgainst {
@@ -1162,7 +1314,7 @@ func (r *NicknameRegexTrigger) Description() string {
 func (r *NicknameRegexTrigger) CheckNickname(t *TriggerContext) (bool, error) {
 	dataCast := t.Data.(*BaseRegexTriggerData)
 
-	item, err := RegexCache.Fetch(dataCast.Regex, time.Minute*10, func() (interface{}, error) {
+	item, err := RegexCache.Fetch(dataCast.Regex, time.Minute*10, func() (any, error) {
 		re, err := regexp.Compile(dataCast.Regex)
 		if err != nil {
 			return nil, err
@@ -1212,7 +1364,7 @@ func (nwl *NicknameWordlistTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (nwl *NicknameWordlistTrigger) DataType() interface{} {
+func (nwl *NicknameWordlistTrigger) DataType() any {
 	return &NicknameWordlistTriggerData{}
 }
 
@@ -1312,7 +1464,7 @@ func (r *GlobalnameRegexTrigger) Description() string {
 func (r *GlobalnameRegexTrigger) CheckGlobalname(t *TriggerContext) (bool, error) {
 	dataCast := t.Data.(*BaseRegexTriggerData)
 
-	item, err := RegexCache.Fetch(dataCast.Regex, time.Minute*10, func() (interface{}, error) {
+	item, err := RegexCache.Fetch(dataCast.Regex, time.Minute*10, func() (any, error) {
 		re, err := regexp.Compile(dataCast.Regex)
 		if err != nil {
 			return nil, err
@@ -1362,7 +1514,7 @@ func (gwl *GlobalnameWordlistTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (gwl *GlobalnameWordlistTrigger) DataType() interface{} {
+func (gwl *GlobalnameWordlistTrigger) DataType() any {
 	return &GlobalnameWorldlistData{}
 }
 
@@ -1446,7 +1598,7 @@ func (gv *GlobalnameInviteTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (gv *GlobalnameInviteTrigger) DataType() interface{} {
+func (gv *GlobalnameInviteTrigger) DataType() any {
 	return nil
 }
 
@@ -1466,6 +1618,9 @@ func (gv *GlobalnameInviteTrigger) CheckGlobalname(t *TriggerContext) (bool, err
 	if common.ContainsInvite(t.MS.User.Globalname, true, true) != nil {
 		return true, nil
 	}
+	if serverpreview.ContainsOtherServerPreviewLink(t.MS.User.Globalname, t.GS.ID) {
+		return true, nil
+	}
 
 	return false, nil
 }
@@ -1481,7 +1636,7 @@ func (mj *MemberJoinTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (mj *MemberJoinTrigger) DataType() interface{} {
+func (mj *MemberJoinTrigger) DataType() any {
 	return nil
 }
 
@@ -1513,7 +1668,7 @@ func (mat *MessageAttachmentTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (mat *MessageAttachmentTrigger) DataType() interface{} {
+func (mat *MessageAttachmentTrigger) DataType() any {
 	return nil
 }
 
@@ -1548,7 +1703,7 @@ func (mat *MessageAttachmentTrigger) CheckMessage(triggerCtx *TriggerContext, cs
 	return false, nil
 }
 
-func (mat *MessageAttachmentTrigger) MergeDuplicates(data []interface{}) interface{} {
+func (mat *MessageAttachmentTrigger) MergeDuplicates(data []any) any {
 	return data[0] // no point in having duplicates of this
 }
 
@@ -1567,7 +1722,7 @@ func (ml *MessageLengthTrigger) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (ml *MessageLengthTrigger) DataType() interface{} {
+func (ml *MessageLengthTrigger) DataType() any {
 	return &MessageLengthTriggerData{}
 }
 
@@ -1599,12 +1754,12 @@ func (ml *MessageLengthTrigger) UserSettings() []*SettingDef {
 
 func (ml *MessageLengthTrigger) CheckMessage(triggerCtx *TriggerContext, cs *dstate.ChannelState, m *discordgo.Message) (bool, error) {
 	dataCast := triggerCtx.Data.(*MessageLengthTriggerData)
-
+	content := strings.Join(m.GetMessageContents(), "")
 	if ml.Inverted {
-		return utf8.RuneCountInString(m.Content) < dataCast.Length, nil
+		return utf8.RuneCountInString(content) < dataCast.Length, nil
 	}
 
-	return utf8.RuneCountInString(m.Content) > dataCast.Length, nil
+	return utf8.RuneCountInString(content) > dataCast.Length, nil
 }
 
 /////////////////////////////////////////////////////////////
@@ -1621,7 +1776,7 @@ func (am *AutomodExecution) Kind() RulePartType {
 	return RulePartTrigger
 }
 
-func (am *AutomodExecution) DataType() interface{} {
+func (am *AutomodExecution) DataType() any {
 	return &AutomodExecutionData{}
 }
 func (am *AutomodExecution) Name() (name string) {

@@ -33,7 +33,7 @@ var configCache = ccache.New(ccache.Configure().MaxSize(15000))
 func BotCachedGetConfig(guildID int64) (*Config, error) {
 	const cacheDuration = 10 * time.Minute
 
-	item, err := configCache.Fetch(cacheKey(guildID), cacheDuration, func() (interface{}, error) {
+	item, err := configCache.Fetch(cacheKey(guildID), cacheDuration, func() (any, error) {
 		return FetchConfig(guildID)
 	})
 	if err != nil {
@@ -202,9 +202,9 @@ func sendTemplate(gs *dstate.GuildSet, cs *dstate.ChannelState, tmpl string, ms 
 
 	var m *discordgo.Message
 	if cs.Type == discordgo.ChannelTypeDM {
-		msg = common.ReplaceServerInvites(msg, 0, "[removed-server-invite]")
+
 		msgSend := ctx.MessageSend(msg)
-		msgSend.Components = bot.GenerateServerInfoButton(gs.ID)
+		msgSend.Components = bot.DMComponents(gs.ID, msgSend.Components, msgSend.Flags)
 		m, err = common.BotSession.ChannelMessageSendComplex(cs.ID, msgSend)
 	} else {
 		if len(ctx.CurrentFrame.AddResponseReactionNames) > 0 || ctx.CurrentFrame.DelResponse || ctx.CurrentFrame.PublishResponse {

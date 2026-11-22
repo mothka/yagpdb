@@ -2,6 +2,7 @@ package inmemorytracker
 
 import (
 	"container/list"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -40,7 +41,7 @@ func NewInMemoryTracker(conf TrackerConfig, totalShards int64) *InMemoryTracker 
 	}
 }
 
-func (t *InMemoryTracker) HandleEvent(s *discordgo.Session, evt interface{}) {
+func (t *InMemoryTracker) HandleEvent(s *discordgo.Session, evt any) {
 	shard := t.getShard(int64(s.ShardID))
 	shard.HandleEvent(s, evt)
 }
@@ -67,10 +68,17 @@ type SparseGuildState struct {
 }
 
 func SparseGuildStateFromDstate(gs *dstate.GuildSet) *SparseGuildState {
+	// state from other processes, such as during shard migrations, can come from versions that didn't set the guild on roles
+	roles := make([]discordgo.Role, len(gs.Roles))
+	for i, v := range gs.Roles {
+		roles[i] = v
+		roles[i].GuildID = gs.ID
+	}
+
 	return &SparseGuildState{
 		Guild:       &gs.GuildState,
 		Channels:    gs.Channels,
-		Roles:       gs.Roles,
+		Roles:       roles,
 		Emojis:      gs.Emojis,
 		Stickers:    gs.Stickers,
 		VoiceStates: gs.VoiceStates,
@@ -144,6 +152,20 @@ func (s *SparseGuildState) channel(id int64) *dstate.ChannelState {
 	return nil
 }
 
+func (s *SparseGuildState) hasChannelOrThread(id int64) bool {
+	if s.channel(id) != nil {
+		return true
+	}
+
+	for i := range s.Threads {
+		if s.Threads[i].ID == id {
+			return true
+		}
+	}
+
+	return false
+}
+
 type WrappedMember struct {
 	lastUpdated time.Time
 	dstate.MemberState
@@ -180,7 +202,7 @@ func newShard(conf TrackerConfig, id int) *ShardTracker {
 	}
 }
 
-func (tracker *ShardTracker) HandleEvent(s *discordgo.Session, i interface{}) {
+func (tracker *ShardTracker) HandleEvent(s *discordgo.Session, i any) {
 
 	switch evt := i.(type) {
 	// Guild events
@@ -272,10 +294,15 @@ func (shard *ShardTracker) handleGuildCreate(gc *discordgo.GuildCreate) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	channels := make([]dstate.ChannelState, len(gc.Channels))
-	for i, v := range gc.Channels {
-		channels[i] = dstate.ChannelStateFromDgo(v)
-		channels[i].GuildID = gc.ID
+	channels := make([]dstate.ChannelState, 0, len(gc.Channels))
+	for _, v := range gc.Channels {
+		if v.Flags&discordgo.ChannelFlagsObfuscated != 0 {
+			continue
+		}
+
+		cs := dstate.ChannelStateFromDgo(v)
+		cs.GuildID = gc.ID
+		channels = append(channels, cs)
 	}
 
 	sort.Sort(dstate.Channels(channels))
@@ -283,6 +310,7 @@ func (shard *ShardTracker) handleGuildCreate(gc *discordgo.GuildCreate) {
 	roles := make([]discordgo.Role, len(gc.Roles))
 	for i := range gc.Roles {
 		roles[i] = *gc.Roles[i]
+		roles[i].GuildID = gc.ID
 	}
 	sort.Sort(dstate.Roles(roles))
 
@@ -320,18 +348,24 @@ func (shard *ShardTracker) handleGuildCreate(gc *discordgo.GuildCreate) {
 	shard.guilds[gc.ID] = guildState
 	shard.guildMessages[gc.ID] = list.New()
 
+	// index the presences first: a big guild sends thousands of members and thousands of
+	// presences, and pairing them up by scanning was quadratic. this runs under the shard
+	// lock on the shard's only event worker, so it used to stall every other event behind
+	// it for entire seconds whenever a large guild reconnected.
+	presences := make(map[int64]*discordgo.Presence, len(gc.Presences))
+	for _, p := range gc.Presences {
+		presences[p.User.ID] = p
+	}
+
 	for _, v := range gc.Members {
 		// problem: the presences in guild does not include a full user object
 		// solution: only load presences that also have a corresponding member object
-		for _, p := range gc.Presences {
-			if p.User.ID == v.User.ID {
-				pms := dstate.MemberStateFromPresence(&discordgo.PresenceUpdate{
-					Presence: *p,
-					GuildID:  gc.ID,
-				})
-				shard.innerHandlePresenceUpdate(pms, true)
-				break
-			}
+		if p, ok := presences[v.User.ID]; ok {
+			pms := dstate.MemberStateFromPresence(&discordgo.PresenceUpdate{
+				Presence: *p,
+				GuildID:  gc.ID,
+			})
+			shard.innerHandlePresenceUpdate(pms, true)
 		}
 
 		ms := dstate.MemberStateFromMember(v)
@@ -377,6 +411,9 @@ func (shard *ShardTracker) handleGuildDelete(gd *discordgo.GuildDelete) {
 			for _, v := range existing.Channels {
 				delete(shard.channelMessages, v.ID)
 			}
+			for _, v := range existing.Threads {
+				delete(shard.channelMessages, v.ID)
+			}
 		}
 
 		delete(shard.guildMessages, gd.ID)
@@ -399,25 +436,19 @@ func (shard *ShardTracker) handleChannelUpdate(c *discordgo.Channel) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	gs := shard.handleChannelCreateUpdate(c)
-	if gs == nil {
-		return
-	}
-
-	// remove threads in the channel from state if we lost access to it
-	ms := shard.getMemberLocked(gs.Guild.ID, shard.conf.BotMemberID)
-	if ms == nil {
-		return
-	}
-
-	// cs cannot be nil here, if it is then we have a race condition
-	cs := gs.channel(c.ID)
-	shard.updateChannelThreadsAccess(gs, ms, cs)
+	shard.handleChannelCreateUpdate(c)
 }
 
+// channels the bot cannot view are dropped from state, discord sends a full channel update once it can view them again
+// a full update is trusted over our own permission calculation, since the role or member update that granted access can arrive after it
 func (shard *ShardTracker) handleChannelCreateUpdate(c *discordgo.Channel) *SparseGuildState {
 	gs, ok := shard.guilds[c.GuildID]
 	if !ok {
+		return nil
+	}
+
+	if c.Flags&discordgo.ChannelFlagsObfuscated != 0 {
+		shard.removeChannels(gs, []int64{c.ID})
 		return nil
 	}
 
@@ -452,14 +483,36 @@ func (shard *ShardTracker) handleChannelDelete(c *discordgo.ChannelDelete) {
 		return
 	}
 
-	for i, v := range gs.Channels {
-		if v.ID == c.ID {
-			newSparseGuild := gs.copyChannels()
-			newSparseGuild.Channels = append(newSparseGuild.Channels[:i], newSparseGuild.Channels[i+1:]...)
-			shard.guilds[c.GuildID] = newSparseGuild
-			return
+	shard.removeChannels(gs, []int64{c.ID})
+}
+
+// removes the channels along with their threads and messages from state
+// assumes shard is locked
+func (shard *ShardTracker) removeChannels(gs *SparseGuildState, channelIDs []int64) {
+	for _, id := range channelIDs {
+		delete(shard.channelMessages, id)
+	}
+
+	gsCopy := gs.copyGuildSet()
+
+	gsCopy.Channels = make([]dstate.ChannelState, 0, len(gs.Channels))
+	for _, cs := range gs.Channels {
+		if !containsInt64(channelIDs, cs.ID) {
+			gsCopy.Channels = append(gsCopy.Channels, cs)
 		}
 	}
+
+	gsCopy.Threads = make([]dstate.ChannelState, 0, len(gs.Threads))
+	for _, thread := range gs.Threads {
+		if containsInt64(channelIDs, thread.ParentID) {
+			delete(shard.channelMessages, thread.ID)
+			continue
+		}
+
+		gsCopy.Threads = append(gsCopy.Threads, thread)
+	}
+
+	shard.guilds[gs.Guild.ID] = gsCopy
 }
 
 ///////////////////
@@ -481,14 +534,15 @@ func (shard *ShardTracker) handleRoleUpdate(guildID int64, r *discordgo.Role) {
 		return
 	}
 
-	// remove threads from cache we lost access to
+	// remove channels and threads from cache we lost access to
 	ms := shard.getMemberLocked(guildID, shard.conf.BotMemberID)
 	if ms == nil {
 		return // note: this shouldn't be possible, should we have a panic here perhaps?
 	}
 
-	if containsInt64(ms.Member.Roles, r.ID) {
-		shard.updateAllThreadsAccess(gs, ms)
+	// the everyone role shares the guild id and is not part of the member's roles
+	if r.ID == guildID || containsInt64(ms.Member.Roles, r.ID) {
+		shard.updateAllChannelsAccess(gs, ms)
 	}
 }
 
@@ -499,10 +553,13 @@ func (shard *ShardTracker) handleRoleCreateUpdate(guildID int64, r *discordgo.Ro
 		return nil
 	}
 
+	role := *r
+	role.GuildID = guildID
+
 	for i, v := range gs.Roles {
 		if v.ID == r.ID {
 			newSparseGuild := gs.copyRoles()
-			newSparseGuild.Roles[i] = *r
+			newSparseGuild.Roles[i] = role
 			sort.Sort(dstate.Roles(newSparseGuild.Roles))
 			shard.guilds[guildID] = newSparseGuild
 			return newSparseGuild
@@ -511,7 +568,7 @@ func (shard *ShardTracker) handleRoleCreateUpdate(guildID int64, r *discordgo.Ro
 
 	// role was not already in state, we need to add it to the roles slice
 	newSparseGuild := gs.copyRoles()
-	newSparseGuild.Roles = append(newSparseGuild.Roles, *r)
+	newSparseGuild.Roles = append(newSparseGuild.Roles, role)
 	sort.Sort(dstate.Roles(newSparseGuild.Roles))
 
 	shard.guilds[guildID] = newSparseGuild
@@ -564,7 +621,7 @@ func (shard *ShardTracker) handleMemberUpdate(m *discordgo.Member) {
 }
 
 // assumes state is locked
-func (shard *ShardTracker) innerHandleMemberUpdate(ms *dstate.MemberState, doThreadsCheck bool) {
+func (shard *ShardTracker) innerHandleMemberUpdate(ms *dstate.MemberState, doAccessCheck bool) {
 
 	wrapped := &WrappedMember{
 		lastUpdated: time.Now(),
@@ -582,23 +639,23 @@ func (shard *ShardTracker) innerHandleMemberUpdate(ms *dstate.MemberState, doThr
 	if existing, ok := members[ms.User.ID]; ok {
 		// carry over presence
 		wrapped.Presence = existing.Presence
-		if doThreadsCheck && shard.conf.BotMemberID == ms.User.ID && (existing.Member == nil || shard.hasRemovedRole(existing.Member.Roles, ms.Member.Roles)) {
-			shard.botMemberUpdateCheckThreads(wrapped)
+		if doAccessCheck && shard.conf.BotMemberID == ms.User.ID && (existing.Member == nil || shard.hasRemovedRole(existing.Member.Roles, ms.Member.Roles)) {
+			shard.botMemberUpdateCheckChannels(wrapped)
 		}
-	} else if doThreadsCheck && shard.conf.BotMemberID == ms.User.ID {
-		shard.botMemberUpdateCheckThreads(wrapped)
+	} else if doAccessCheck && shard.conf.BotMemberID == ms.User.ID {
+		shard.botMemberUpdateCheckChannels(wrapped)
 	}
 
 	members[ms.User.ID] = wrapped
 }
 
-func (shard *ShardTracker) botMemberUpdateCheckThreads(wrapped *WrappedMember) {
+func (shard *ShardTracker) botMemberUpdateCheckChannels(wrapped *WrappedMember) {
 	gs, ok := shard.guilds[wrapped.GuildID]
 	if !ok {
 		return
 	}
 
-	shard.updateAllThreadsAccess(gs, wrapped)
+	shard.updateAllChannelsAccess(gs, wrapped)
 }
 
 func (shard *ShardTracker) hasRemovedRole(oldRoles []int64, newRoles []int64) bool {
@@ -718,13 +775,10 @@ func (shard *ShardTracker) handleMessageDeleteBulk(m *discordgo.MessageDeleteBul
 		for e := cl.Back(); e != nil; e = e.Prev() {
 			cast := e.Value.(*dstate.MessageState)
 
-			for _, delID := range m.Messages {
-				if delID == cast.ID {
-					cop := *cast
-					cop.Deleted = true
-					e.Value = &cop
-					break
-				}
+			if slices.Contains(m.Messages, cast.ID) {
+				cop := *cast
+				cop.Deleted = true
+				e.Value = &cop
 			}
 		}
 	}
@@ -941,11 +995,13 @@ func (shard *ShardTracker) handleThreadListSync(evt *discordgo.ThreadListSync) {
 
 	newGS := gs.copyGuildSet()
 
-	// keep old un updated threads
-	newGS.Threads = make([]dstate.ChannelState, len(gs.Threads))
-	for _, v := range gs.Threads {
-		if !containsInt64(evt.Channels, v.ParentID) {
-			newGS.Threads = append(newGS.Threads, v)
+	// keep old un updated threads, a sync without channel ids covers the whole guild
+	newGS.Threads = make([]dstate.ChannelState, 0, len(gs.Threads)+len(evt.Threads))
+	if len(evt.Channels) > 0 {
+		for _, v := range gs.Threads {
+			if !containsInt64(evt.Channels, v.ParentID) {
+				newGS.Threads = append(newGS.Threads, v)
+			}
 		}
 	}
 
@@ -957,72 +1013,46 @@ func (shard *ShardTracker) handleThreadListSync(evt *discordgo.ThreadListSync) {
 	shard.guilds[evt.GuildID] = newGS
 }
 
-// checks all threads for if we have permissions to view them, and if not remove them from the state
+// checks all channels and threads for if we have permissions to view them, and if not remove them from the state
+// discord only sends the event that changed our permissions when we lose access, not a channel update
 // assumes shard is locked
-func (shard *ShardTracker) updateAllThreadsAccess(gs *SparseGuildState, ms *WrappedMember) {
+func (shard *ShardTracker) updateAllChannelsAccess(gs *SparseGuildState, ms *WrappedMember) {
 	removeChannels := make([]int64, 0)
 
 	guildPerms := dstate.CalculateBasePermissions(gs.Guild.ID, gs.Guild.OwnerID, gs.Roles, ms.User.ID, ms.Member.Roles)
 
+	for i := range gs.Channels {
+		cs := &gs.Channels[i]
+		if cs.Type != discordgo.ChannelTypeGuildCategory && !botHasAccessToChannel(gs, ms, cs, guildPerms) {
+			removeChannels = append(removeChannels, cs.ID)
+		}
+	}
+
+	// discord considers a category viewable if any of its children are
+	for i := range gs.Channels {
+		cs := &gs.Channels[i]
+		if cs.Type == discordgo.ChannelTypeGuildCategory && !botHasAccessToChannel(gs, ms, cs, guildPerms) && !categoryHasChildren(gs, cs.ID, removeChannels) {
+			removeChannels = append(removeChannels, cs.ID)
+		}
+	}
+
 	for i := range gs.Threads {
 		parent := gs.Threads[i].ParentID
-		if containsInt64(removeChannels, parent) {
-			continue
-		}
-
-		if cs := gs.channel(parent); cs != nil {
-			if !botHasAccessToChannel(gs, ms, cs, guildPerms) {
-				removeChannels = append(removeChannels, cs.ID)
-			}
-		} else {
+		if !containsInt64(removeChannels, parent) && gs.channel(parent) == nil {
 			removeChannels = append(removeChannels, parent)
 		}
 	}
 
 	if len(removeChannels) < 1 {
-		return // the bot did not lose access to any thread channels
+		return // the bot did not lose access to any channels
 	}
 
-	// apply the changes, removing the threads for the channels we lost access to
-	gsCopy := gs.copyGuildSet()
-	gsCopy.Threads = make([]dstate.ChannelState, 0, len(gs.Threads))
-	for _, thread := range gs.Threads {
-		if !containsInt64(removeChannels, thread.ParentID) {
-			gsCopy.Threads = append(gsCopy.Threads, thread)
-		}
-	}
-
-	shard.guilds[gs.Guild.ID] = gsCopy
+	shard.removeChannels(gs, removeChannels)
 }
 
-// checks all threads in the provided channel for if we have permissions to view them, and if not remove them from the state
-// assumes shard is locked
-func (shard *ShardTracker) updateChannelThreadsAccess(gs *SparseGuildState, ms *WrappedMember, cs *dstate.ChannelState) {
-	if !channelHasThreads(gs, cs.ID) {
-		return
-	}
-
-	guildPerms := dstate.CalculateBasePermissions(gs.Guild.ID, gs.Guild.OwnerID, gs.Roles, ms.User.ID, ms.Member.Roles)
-	if botHasAccessToChannel(gs, ms, cs, guildPerms) {
-		// no changes needed, we still have access
-		return
-	}
-
-	// apply the changes, removing the threads for the channels we lost access to
-	gsCopy := gs.copyGuildSet()
-	gsCopy.Threads = make([]dstate.ChannelState, 0, len(gs.Threads))
-	for _, thread := range gs.Threads {
-		if thread.ParentID != cs.ID {
-			gsCopy.Threads = append(gsCopy.Threads, thread)
-		}
-	}
-
-	shard.guilds[gs.Guild.ID] = gsCopy
-}
-
-func channelHasThreads(gs *SparseGuildState, cID int64) bool {
-	for i := range gs.Threads {
-		if gs.Threads[i].ParentID == cID {
+func categoryHasChildren(gs *SparseGuildState, categoryID int64, ignore []int64) bool {
+	for i := range gs.Channels {
+		if gs.Channels[i].ParentID == categoryID && !containsInt64(ignore, gs.Channels[i].ID) {
 			return true
 		}
 	}
@@ -1035,16 +1065,17 @@ func botHasAccessToChannel(gs *SparseGuildState, ms *WrappedMember, cs *dstate.C
 		return true
 	}
 
+	// being connected to a voice channel also grants viewing it
+	for i := range gs.VoiceStates {
+		if gs.VoiceStates[i].UserID == ms.User.ID && gs.VoiceStates[i].ChannelID == cs.ID {
+			return true
+		}
+	}
+
 	fullPerms := dstate.ApplyChannelPermissions(guildPerms, gs.Guild.ID, cs.PermissionOverwrites, ms.User.ID, ms.Member.Roles)
 	return fullPerms&discordgo.PermissionViewChannel == discordgo.PermissionViewChannel
 }
 
 func containsInt64(slice []int64, i int64) bool {
-	for _, v := range slice {
-		if v == i {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(slice, i)
 }

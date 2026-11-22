@@ -16,6 +16,13 @@ type System struct {
 	Prefix         PrefixProvider
 	ResponseSender ResponseSender
 	State          dstate.StateTracker
+
+	// AddChannelToState is called when a message or interaction comes from a channel or thread that is not in state,
+	// so it can be fetched and added to state before the command runs
+	AddChannelToState func(guildID, channelID int64)
+
+	// Mentions, direct messages and slash commands are unaffected.
+	DisablePrefixTrigger bool
 }
 
 func NewStandardSystem(staticPrefix string) (system *System) {
@@ -27,7 +34,7 @@ func NewStandardSystem(staticPrefix string) (system *System) {
 		sys.Prefix = NewSimplePrefixProvider(staticPrefix)
 	}
 
-	sys.Root.AddMidlewares(ArgParserMW)
+	sys.Root.AddMiddlewares(ArgParserMW)
 
 	return sys
 }
@@ -108,6 +115,10 @@ func (sys *System) FindPrefix(data *Data) (found bool) {
 		return true
 	}
 
+	if sys.DisablePrefixTrigger {
+		return false
+	}
+
 	// Check for custom prefix
 	if sys.Prefix == nil {
 		return false
@@ -140,6 +151,10 @@ func (sys *System) FindPrefixWithPrefetched(data *Data, commandPrefix string) (f
 
 	if sys.FindMentionPrefix(data) {
 		return true
+	}
+
+	if sys.DisablePrefixTrigger || commandPrefix == "" {
+		return false
 	}
 
 	data.TraditionalTriggerData.PrefixUsed = commandPrefix
@@ -192,6 +207,19 @@ var (
 	ErrMemberNotAvailableInteraction = errors.New("Member not provided in interaction")
 )
 
+func (sys *System) fetchChannelOrThread(gs *dstate.GuildSet, channelID int64) (*dstate.GuildSet, *dstate.ChannelState) {
+	if cs := gs.GetChannelOrThread(channelID); cs != nil || sys.AddChannelToState == nil {
+		return gs, cs
+	}
+
+	sys.AddChannelToState(gs.ID, channelID)
+	if gs = sys.State.GetGuild(gs.ID); gs == nil {
+		return nil, nil
+	}
+
+	return gs, gs.GetChannelOrThread(channelID)
+}
+
 func (sys *System) FillDataLegacyMessage(s *discordgo.Session, m *discordgo.Message) (*Data, error) {
 	var gs *dstate.GuildSet
 	var cs *dstate.ChannelState
@@ -202,7 +230,7 @@ func (sys *System) FillDataLegacyMessage(s *discordgo.Session, m *discordgo.Mess
 			return nil, ErrGuildNotFound
 		}
 
-		cs = gs.GetChannelOrThread(m.ChannelID)
+		gs, cs = sys.fetchChannelOrThread(gs, m.ChannelID)
 		if cs == nil {
 			return nil, ErrChannelNotFound
 		}
@@ -252,7 +280,14 @@ func (sys *System) FillDataInteraction(s *discordgo.Session, interaction *discor
 			return nil, ErrGuildNotFound
 		}
 
-		cs = gs.GetChannelOrThread(interaction.ChannelID)
+		if dstate.BotCanViewInteractionChannel(interaction) {
+			gs, _ = sys.fetchChannelOrThread(gs, interaction.ChannelID)
+			if gs == nil {
+				return nil, ErrGuildNotFound
+			}
+		}
+
+		gs, cs = gs.WithInteractionChannel(interaction)
 		if cs == nil {
 			return nil, ErrChannelNotFound
 		}
@@ -297,7 +332,7 @@ func (sys *System) FillDataInteraction(s *discordgo.Session, interaction *discor
 	return data, nil
 }
 
-func (sys *System) handlePanic(s *discordgo.Session, r interface{}, sendChatNotice bool) {
+func (sys *System) handlePanic(s *discordgo.Session, r any, sendChatNotice bool) {
 	// TODO
 	stack := debug.Stack()
 	log.Printf("[DCMD PANIC] %v\n%s", r, string(stack))
@@ -322,22 +357,22 @@ func (pp *SimplePrefixProvider) Prefix(d *Data) string {
 }
 
 func Indent(depth int) string {
-	indent := ""
-	for i := 0; i < depth; i++ {
-		indent += "-"
+	var indent strings.Builder
+	for range depth {
+		indent.WriteString("-")
 	}
-	return indent
+	return indent.String()
 }
 
 type ResponseSender interface {
-	SendResponse(cmdData *Data, resp interface{}, err error) error
+	SendResponse(cmdData *Data, resp any, err error) error
 }
 
 type StdResponseSender struct {
 	LogErrors bool
 }
 
-func (s *StdResponseSender) SendResponse(cmdData *Data, resp interface{}, err error) error {
+func (s *StdResponseSender) SendResponse(cmdData *Data, resp any, err error) error {
 	if err != nil && s.LogErrors {
 		log.Printf("[DCMD]: Command %q returned an error: %s", cmdData.Cmd.FormatNames(false, "/"), err)
 	}

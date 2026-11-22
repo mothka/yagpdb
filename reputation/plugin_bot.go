@@ -27,8 +27,30 @@ import (
 var _ bot.BotInitHandler = (*Plugin)(nil)
 var _ commands.CommandProvider = (*Plugin)(nil)
 
+var repLegacyNames = map[string][]string{
+	"Give":   {"giverep", "+", "gr", "grep", "+rep"},
+	"Take":   {"takerep", "-", "tr", "trep", "-rep"},
+	"Set":    {"setrep", "setrepid"},
+	"Delete": {"delrep"},
+	"Log":    {"replog", "replogs"},
+	"Top":    {"toprep"},
+}
+
 func (p *Plugin) AddCommands() {
-	commands.AddRootCommands(p, cmds...)
+	container, _ := commands.CommandSystem.Root.Sub("rep")
+	container.Description = "Give, take and inspect reputation"
+
+	for _, cmd := range cmds {
+		commands.AddContainerCommand(container, cmd)
+
+		if legacy, ok := repLegacyNames[cmd.Name]; ok {
+			commands.AddRootAliases(p, cmd, legacy...)
+		}
+	}
+
+	commands.RegisterSlashCommandsContainer(container, false, func(gs *dstate.GuildSet) ([]int64, error) {
+		return nil, nil
+	})
 }
 
 func (p *Plugin) BotInit() {
@@ -130,17 +152,15 @@ func handleMessageCreate(evt *eventsystem.EventData) {
 var cmds = []*commands.YAGCommand{
 	{
 		CmdCategory:  commands.CategoryFun,
-		Name:         "TakeRep",
-		Aliases:      []string{"-", "tr", "trep", "-rep"},
+		Name:         "Take",
 		Description:  "Takes away rep from someone",
 		RequiredArgs: 1,
 		Arguments: []*dcmd.ArgDef{
 			{Name: "User", Type: dcmd.User},
 			{Name: "Num", Type: dcmd.Int, Default: 1},
 		},
-		SlashCommandEnabled: true,
-		DefaultEnabled:      false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		DefaultEnabled: false,
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			if parsed.Args[1].Int() < 1 {
 				return "**rep amount should be greater than or equal to 1**", nil
 			}
@@ -149,18 +169,16 @@ var cmds = []*commands.YAGCommand{
 		},
 	},
 	{
-		CmdCategory:         commands.CategoryFun,
-		Name:                "GiveRep",
-		Aliases:             []string{"+", "gr", "grep", "+rep"},
-		Description:         "Gives rep to someone",
-		RequiredArgs:        1,
-		SlashCommandEnabled: true,
-		DefaultEnabled:      false,
+		CmdCategory:    commands.CategoryFun,
+		Name:           "Give",
+		Description:    "Gives rep to someone",
+		RequiredArgs:   1,
+		DefaultEnabled: false,
 		Arguments: []*dcmd.ArgDef{
 			{Name: "User", Type: dcmd.User},
 			{Name: "Num", Type: dcmd.Int, Default: 1},
 		},
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			if parsed.Args[1].Int() < 1 {
 				return "**rep amount should be greater than or equal to 1**", nil
 			}
@@ -168,18 +186,16 @@ var cmds = []*commands.YAGCommand{
 		},
 	},
 	{
-		CmdCategory:         commands.CategoryFun,
-		Name:                "SetRep",
-		Aliases:             []string{"SetRepID"}, // alias for legacy reasons, used to be a standalone command
-		Description:         "Sets someones rep, this is an admin command and bypasses cooldowns and other restrictions.",
-		RequiredArgs:        2,
-		SlashCommandEnabled: true,
-		DefaultEnabled:      false,
+		CmdCategory:    commands.CategoryFun,
+		Name:           "Set",
+		Description:    "Sets someones rep, this is an admin command and bypasses cooldowns and other restrictions.",
+		RequiredArgs:   2,
+		DefaultEnabled: false,
 		Arguments: []*dcmd.ArgDef{
 			{Name: "User", Type: dcmd.UserID},
 			{Name: "Num", Type: dcmd.Int},
 		},
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			conf, err := GetConfig(parsed.Context(), parsed.GuildData.GS.ID)
 			if err != nil {
 				return "An error occurred while finding the server config", err
@@ -217,16 +233,15 @@ var cmds = []*commands.YAGCommand{
 		},
 	},
 	{
-		CmdCategory:         commands.CategoryFun,
-		Name:                "DelRep",
-		Description:         "Deletes someone from the reputation list completely, this cannot be undone.",
-		RequiredArgs:        1,
-		SlashCommandEnabled: true,
-		DefaultEnabled:      false,
+		CmdCategory:    commands.CategoryFun,
+		Name:           "Delete",
+		Description:    "Deletes someone from the reputation list completely, this cannot be undone.",
+		RequiredArgs:   1,
+		DefaultEnabled: false,
 		Arguments: []*dcmd.ArgDef{
 			{Name: "User", Type: dcmd.UserID},
 		},
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			conf, err := GetConfig(parsed.Context(), parsed.GuildData.GS.ID)
 			if err != nil {
 				return "An error occurred while finding the server config", err
@@ -251,18 +266,16 @@ var cmds = []*commands.YAGCommand{
 		},
 	},
 	{
-		CmdCategory:         commands.CategoryFun,
-		Name:                "RepLog",
-		Aliases:             []string{"replogs"},
-		Description:         "Shows the rep log for the specified user.",
-		SlashCommandEnabled: true,
-		DefaultEnabled:      false,
+		CmdCategory:    commands.CategoryFun,
+		Name:           "Log",
+		Description:    "Shows the rep log for the specified user.",
+		DefaultEnabled: false,
 		Arguments: []*dcmd.ArgDef{
 			{Name: "User", Type: dcmd.UserID},
 			{Name: "Page", Type: dcmd.Int, Default: 1},
 		},
 		ArgumentCombos: [][]int{{}, {0}, {1}, {0, 1}},
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			conf, err := GetConfig(parsed.Context(), parsed.GuildData.GS.ID)
 			if err != nil {
 				return "An error occurred while finding the server config", err
@@ -355,15 +368,16 @@ var cmds = []*commands.YAGCommand{
 		},
 	},
 	{
-		CmdCategory: commands.CategoryFun,
-		Name:        "Rep",
-		Description: "Shows yours or the specified users current rep and rank",
+		CmdCategory:         commands.CategoryFun,
+		Name:                "Check",
+		Aliases:             []string{""},
+		LegacyOverrideNames: []string{"rep"},
+		Description:         "Shows yours or the specified users current rep and rank",
 		Arguments: []*dcmd.ArgDef{
 			{Name: "User", Type: dcmd.User},
 		},
-		SlashCommandEnabled: true,
-		DefaultEnabled:      false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		DefaultEnabled: false,
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			target := parsed.Author
 			if parsed.Args[0].Value != nil {
 				target = parsed.Args[0].Value.(*discordgo.User)
@@ -394,7 +408,7 @@ var cmds = []*commands.YAGCommand{
 	},
 	{
 		CmdCategory: commands.CategoryFun,
-		Name:        "TopRep",
+		Name:        "Top",
 		Description: "Shows rep leaderboard on the server",
 		Arguments: []*dcmd.ArgDef{
 			{Name: "Page", Type: dcmd.Int, Default: 0},
@@ -402,9 +416,8 @@ var cmds = []*commands.YAGCommand{
 		ArgSwitches: []*dcmd.ArgDef{
 			{Name: "user", Help: "User to search for in the leaderboard", Type: dcmd.UserID},
 		},
-		SlashCommandEnabled: true,
-		DefaultEnabled:      true,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		DefaultEnabled: true,
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			page := parsed.Args[0].Int()
 			if id := parsed.Switch("user").Int64(); id != 0 {
 				const query = `
@@ -465,23 +478,24 @@ func topRepPager(guildID int64, p *paginatedmessages.PaginatedMessage, page int)
 	}
 
 	leaderboardURL := web.BaseURL() + "/public/" + discordgo.StrID(guildID) + "/reputation/leaderboard"
-	out := "```\n# -- Points -- User\n"
+	var out strings.Builder
+	out.WriteString("```\n# -- Points -- User\n")
 	for _, v := range detailed {
 		user := v.Username
 		if user == "" {
 			user = "unknown ID:" + strconv.FormatInt(v.UserID, 10)
 		}
-		out += fmt.Sprintf("#%02d: %6d - %s\n", v.Rank, v.Points, user)
+		out.WriteString(fmt.Sprintf("#%02d: %6d - %s\n", v.Rank, v.Points, user))
 	}
-	out += "```\n" + "Full leaderboard: <" + leaderboardURL + ">"
+	out.WriteString("```\n" + "Full leaderboard: <" + leaderboardURL + ">")
 
-	embed.Description = out
+	embed.Description = out.String()
 
 	return embed, nil
 
 }
 
-func CmdGiveRep(parsed *dcmd.Data) (interface{}, error) {
+func CmdGiveRep(parsed *dcmd.Data) (any, error) {
 	target := parsed.Args[0].Value.(*discordgo.User)
 
 	conf, err := GetConfig(parsed.Context(), parsed.GuildData.GS.ID)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"slices"
+	"strings"
 
 	"github.com/botlabs-gg/yagpdb/v2/analytics"
 	"github.com/botlabs-gg/yagpdb/v2/bot/eventsystem"
@@ -56,7 +57,7 @@ func (p *Plugin) AddCommands() {
 		},
 		ArgSwitches: []*dcmd.ArgDef{
 			{Name: "m", Help: "Message ID", Type: dcmd.BigInt},
-			{Name: "nodm", Help: "Disable assignment confirmation DMs"},
+			{Name: "dm", Help: "Enable assignment confirmation DMs"},
 			{Name: "rr", Help: "Disable removing role upon removing reaction"},
 			{Name: "skip", Help: "Number of roles to skip", Default: 0, Type: dcmd.Int},
 		},
@@ -179,6 +180,7 @@ type ScheduledEventUpdateMenuMessageData struct {
 func (p *Plugin) BotInit() {
 	eventsystem.AddHandlerAsyncLastLegacy(p, handleReactionAddRemove, eventsystem.EventMessageReactionAdd, eventsystem.EventMessageReactionRemove)
 	eventsystem.AddHandlerAsyncLastLegacy(p, handleMessageRemove, eventsystem.EventMessageDelete, eventsystem.EventMessageDeleteBulk)
+	eventsystem.AddHandlerAsyncLast(p, handleRoleMenuDropdownInteraction, eventsystem.EventInteractionCreate)
 
 	scheduledevents2.RegisterHandler("remove_member_role", ScheduledMemberRoleRemoveData{}, handleRemoveMemberRole)
 	scheduledevents2.RegisterHandler("rolemenu_update_message", ScheduledEventUpdateMenuMessageData{}, handleUpdateRolemenuMessage)
@@ -189,7 +191,7 @@ func (p *Plugin) BotInit() {
 	}, nil)
 }
 
-func CmdFuncRole(parsed *dcmd.Data) (interface{}, error) {
+func CmdFuncRole(parsed *dcmd.Data) (any, error) {
 	if parsed.Args[0].Value == nil {
 		return CmdFuncListCommands(parsed)
 	}
@@ -240,13 +242,14 @@ func HumanizeAssignError(guild *dstate.GuildSet, err error) (string, error) {
 
 }
 
-func CmdFuncListCommands(parsed *dcmd.Data) (interface{}, error) {
+func CmdFuncListCommands(parsed *dcmd.Data) (any, error) {
 	_, grouped, ungrouped, err := GetAllRoleCommandsSorted(parsed.Context(), parsed.GuildData.GS.ID)
 	if err != nil {
 		return "Failed retrieving role commands", err
 	}
 
-	output := "Here is a list of available roles:\n"
+	var output strings.Builder
+	output.WriteString("Here is a list of available roles:\n")
 
 	didListCommands := false
 	for group, cmds := range grouped {
@@ -255,52 +258,53 @@ func CmdFuncListCommands(parsed *dcmd.Data) (interface{}, error) {
 		}
 		didListCommands = true
 
-		output += "**" + group.Name + "**\n"
-		output += StringCommands(cmds)
-		output += "\n"
+		output.WriteString("**" + group.Name + "**\n")
+		output.WriteString(StringCommands(cmds))
+		output.WriteString("\n")
 	}
 
 	if len(ungrouped) > 0 {
 		didListCommands = true
 
-		output += "**Ungrouped roles**\n"
-		output += StringCommands(ungrouped)
+		output.WriteString("**Ungrouped roles**\n")
+		output.WriteString(StringCommands(ungrouped))
 	}
 
 	if !didListCommands {
-		output += "No role commands (self assignable roles) set up. You can set them up in the control panel."
+		output.WriteString("No role commands (self assignable roles) set up. You can set them up in the control panel.")
 	}
 
-	return output, nil
+	return output.String(), nil
 }
 
 // StringCommands pretty formats a bunch of commands into  a string
 func StringCommands(cmds []*models.RoleCommand) string {
 	stringedCommands := make([]int64, 0, len(cmds))
 
-	output := "```\n"
+	var output strings.Builder
+	output.WriteString("```\n")
 
 	for _, cmd := range cmds {
 		if slices.Contains(stringedCommands, cmd.Role) {
 			continue
 		}
 
-		output += cmd.Name
+		output.WriteString(cmd.Name)
 		// Check for duplicate roles
 		for _, cmd2 := range cmds {
 			if cmd.Role == cmd2.Role && cmd.Name != cmd2.Name {
-				output += "/ " + cmd2.Name
+				output.WriteString("/ " + cmd2.Name)
 			}
 		}
-		output += "\n"
+		output.WriteString("\n")
 
 		stringedCommands = append(stringedCommands, cmd.Role)
 	}
 
-	return output + "```\n"
+	return output.String() + "```\n"
 }
 
-func handleUpdateRolemenuMessage(evt *schEvtsModels.ScheduledEvent, data interface{}) (retry bool, err error) {
+func handleUpdateRolemenuMessage(evt *schEvtsModels.ScheduledEvent, data any) (retry bool, err error) {
 	dataCast := data.(*ScheduledEventUpdateMenuMessageData)
 
 	fullMenu, err := FindRolemenuFull(context.Background(), dataCast.MessageID, dataCast.GuildID)
@@ -308,7 +312,11 @@ func handleUpdateRolemenuMessage(evt *schEvtsModels.ScheduledEvent, data interfa
 		return false, err
 	}
 
-	err = UpdateRoleMenuMessage(context.Background(), fullMenu)
+	if isDropdownMenu(fullMenu) {
+		err = updateRoleMenuDropdownMessage(fullMenu, nil)
+	} else {
+		err = UpdateRoleMenuMessage(context.Background(), fullMenu)
+	}
 	if err != nil {
 		return false, err
 	}
@@ -316,7 +324,7 @@ func handleUpdateRolemenuMessage(evt *schEvtsModels.ScheduledEvent, data interfa
 	return false, nil
 }
 
-func handleRemoveMemberRole(evt *schEvtsModels.ScheduledEvent, data interface{}) (retry bool, err error) {
+func handleRemoveMemberRole(evt *schEvtsModels.ScheduledEvent, data any) (retry bool, err error) {
 	dataCast := data.(*ScheduledMemberRoleRemoveData)
 	err = common.BotSession.GuildMemberRoleRemove(dataCast.GuildID, dataCast.UserID, dataCast.RoleID)
 	if err != nil {
@@ -335,6 +343,10 @@ func handleRemoveMemberRole(evt *schEvtsModels.ScheduledEvent, data interface{})
 
 OUTER:
 	for _, v := range menus {
+		if isDropdownMenu(v) {
+			continue
+		}
+
 		for _, opt := range v.R.RoleMenuOptions {
 			if opt.R.RoleCommand.Role == dataCast.RoleID {
 				// remove it
@@ -364,7 +376,7 @@ func GetRolemenuCached(ctx context.Context, gs *dstate.GuildSet, messageID int64
 	result, err := menuCache.GetCustomFetch(CacheKey{
 		GuildID:   gs.ID,
 		MessageID: messageID,
-	}, func(key interface{}) (interface{}, error) {
+	}, func(key any) (any, error) {
 		menu, err := FindRolemenuFull(ctx, messageID, gs.ID)
 		if err != nil {
 			if err != sql.ErrNoRows {
@@ -388,7 +400,7 @@ func GetRolemenuCached(ctx context.Context, gs *dstate.GuildSet, messageID int64
 }
 
 func ClearRolemenuCache(gID int64) {
-	menuCache.DeleteFunc(func(key interface{}, value interface{}) bool {
+	menuCache.DeleteFunc(func(key any, value any) bool {
 		keyCast := key.(CacheKey)
 		return keyCast.GuildID == gID
 	})

@@ -39,22 +39,41 @@ func handleInteractionCreate(evt *eventsystem.EventData) {
 		return
 	}
 
-	cState := evt.GS.GetChannelOrThread(interaction.ChannelID)
+	var cState *dstate.ChannelState
+	evt.GS, cState = bot.InteractionChannel(evt.GS, interaction.Interaction)
 	if cState == nil {
 		return
 	}
 
-	// Ephemeral messages always have guild_id = 0 even if created in a guild channel; see
-	// https://github.com/discord/discord-api-docs/issues/4557. But exec/execAdmin rely
-	// on the guild ID of the message to fill guild data, so patch it here.
-	if interaction.Message == nil || interaction.Member == nil {
+	// A guild interaction always has a member. Components are always attached to a
+	// message, but modals opened from a slash command have no source message, so the
+	// message is only required by (and patched for) the component path below.
+	if interaction.Member == nil {
 		return
 	}
-	interaction.Message.GuildID = evt.GS.ID
+
+	// Interaction members never carry guild_id, and ephemeral messages always have
+	// guild_id = 0 even if created in a guild channel;
+	// see https://github.com/discord/discord-api-docs/issues/4557. Role functions and
+	// exec/execAdmin rely on these guild IDs, so patch them here.
 	interaction.Member.GuildID = evt.GS.ID
+	if interaction.Message != nil {
+		interaction.Message.GuildID = evt.GS.ID
+	}
+
+	// Slash command interactions carry no source message, so handle them before the
+	// message guard below that the component & modal paths rely on.
+	if interaction.Type == discordgo.InteractionApplicationCommand {
+		handleSlashCommandInteraction(evt, cState, &interaction)
+		return
+	}
 
 	switch interaction.Type {
 	case discordgo.InteractionMessageComponent:
+		if interaction.Message == nil {
+			return
+		}
+
 		cMessage, err := common.BotSession.ChannelMessage(cState.ID, interaction.Message.ID)
 		if err == nil {
 			cMessage.GuildID = cState.GuildID
@@ -69,13 +88,16 @@ func handleInteractionCreate(evt *eventsystem.EventData) {
 			return
 		}
 
-		triggeredCmds, err := findComponentOrModalTriggerCustomCommands(evt.Context(), cState, interaction.Member, cID, false)
+		triggeredCmds, restricted, err := findComponentOrModalTriggerCustomCommands(evt.Context(), cState, interaction.Member, cID, false)
 		if err != nil {
 			logger.WithField("guild", evt.GS.ID).WithError(err).Error("failed finding component ccs")
 			return
 		}
 
 		if len(triggeredCmds) < 1 {
+			if restricted {
+				respondRestrictedInteraction(&interaction)
+			}
 			return
 		}
 
@@ -95,13 +117,16 @@ func handleInteractionCreate(evt *eventsystem.EventData) {
 			return
 		}
 
-		triggeredCmds, err := findComponentOrModalTriggerCustomCommands(evt.Context(), cState, interaction.Member, cID, true)
+		triggeredCmds, restricted, err := findComponentOrModalTriggerCustomCommands(evt.Context(), cState, interaction.Member, cID, true)
 		if err != nil {
 			logger.WithField("guild", evt.GS.ID).WithError(err).Error("failed finding component ccs")
 			return
 		}
 
 		if len(triggeredCmds) < 1 {
+			if restricted {
+				respondRestrictedInteraction(&interaction)
+			}
 			return
 		}
 
@@ -113,6 +138,25 @@ func handleInteractionCreate(evt *eventsystem.EventData) {
 			}
 		}
 	}
+}
+
+func respondRestrictedInteraction(interaction *templates.CustomCommandInteraction) {
+	if interaction.RespondedTo {
+		return
+	}
+
+	err := common.BotSession.CreateInteractionResponse(interaction.ID, interaction.Token, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Flags:   discordgo.MessageFlagsEphemeral,
+			Content: "This command is restricted and can't be used in this channel or by you.",
+		},
+	})
+	if err != nil {
+		logger.WithField("guild", interaction.GuildID).WithError(err).Error("Error responding to restricted interaction")
+		return
+	}
+	interaction.RespondedTo = true
 }
 
 func deferResponseToCCs(interaction *templates.CustomCommandInteraction, ccs []*TriggeredCC) {
@@ -140,6 +184,7 @@ func deferResponseToCCs(interaction *templates.CustomCommandInteraction, ccs []*
 		err := common.BotSession.CreateInteractionResponse(interaction.ID, interaction.Token, def)
 		if err != nil {
 			logger.WithField("guild", interaction.GuildID).WithError(err).Error("Error deferring response")
+			return
 		}
 		interaction.RespondedTo = true
 		interaction.Deferred = true
@@ -149,7 +194,7 @@ func deferResponseToCCs(interaction *templates.CustomCommandInteraction, ccs []*
 var cachedCommandsComponentTrigger = common.CacheSet.RegisterSlot("custom_commands_component_trigger", nil, int64(0))
 
 func BotCachedGetCommandsWithComponentTrigger(guildID int64, ctx context.Context) ([]*models.CustomCommand, error) {
-	v, err := cachedCommandsComponentTrigger.GetCustomFetch(guildID, func(key interface{}) (interface{}, error) {
+	v, err := cachedCommandsComponentTrigger.GetCustomFetch(guildID, func(key any) (any, error) {
 		var cmds []*models.CustomCommand
 		var err error
 		common.LogLongCallTime(time.Second, true, "Took longer than a second to fetch custom commands from db", logrus.Fields{"guild": guildID}, func() {
@@ -163,61 +208,56 @@ func BotCachedGetCommandsWithComponentTrigger(guildID int64, ctx context.Context
 	return v.([]*models.CustomCommand), nil
 }
 
-func findComponentOrModalTriggerCustomCommands(ctx context.Context, cs *dstate.ChannelState, member *discordgo.Member, cID string, modal bool) (matches []*TriggeredCC, err error) {
+func findComponentOrModalTriggerCustomCommands(ctx context.Context, cs *dstate.ChannelState, member *discordgo.Member, cID string, modal bool) (matches []*TriggeredCC, restricted bool, err error) {
 	cmds, err := BotCachedGetCommandsWithComponentTrigger(cs.GuildID, ctx)
 	if err != nil {
-		return nil, errors.WrapIf(err, "BotCachedGetCommandsWithComponentTriggers")
+		return nil, false, errors.WrapIf(err, "BotCachedGetCommandsWithComponentTriggers")
 	}
 
-	var matched []*TriggeredCC
+	var triggerMatched []*TriggeredCC
 	for _, cmd := range cmds {
-		if cmd.Disabled || !CmdRunsInChannel(cmd, common.ChannelOrThreadParentID(cs)) || cmd.R.Group != nil && cmd.R.Group.Disabled {
+		if cmd.Disabled || (cmd.R != nil && cmd.R.Group != nil && cmd.R.Group.Disabled) {
 			continue
 		}
 
+		var didMatch bool
+		var stripped string
+		var args []string
 		if modal {
-			if didMatch, stripped, args := CheckMatchModal(cmd, cID); didMatch {
-
-				matched = append(matched, &TriggeredCC{
-					CC:       cmd,
-					Stripped: stripped,
-					Args:     args,
-				})
-			}
+			didMatch, stripped, args = CheckMatchModal(cmd, cID)
 		} else {
-			if didMatch, stripped, args := CheckMatchComponent(cmd, cID); didMatch {
-
-				matched = append(matched, &TriggeredCC{
-					CC:       cmd,
-					Stripped: stripped,
-					Args:     args,
-				})
-			}
+			didMatch, stripped, args = CheckMatchComponent(cmd, cID)
+		}
+		if didMatch {
+			triggerMatched = append(triggerMatched, &TriggeredCC{CC: cmd, Stripped: stripped, Args: args})
 		}
 	}
 
-	if len(matched) < 1 {
+	if len(triggerMatched) < 1 {
 		// no matches
-		return matched, nil
+		return nil, false, nil
 	}
 
 	ms, err := bot.GetMember(cs.GuildID, member.User.ID)
 	if err != nil {
-		return nil, errors.WithStackIf(err)
+		return nil, false, errors.WithStackIf(err)
 	}
 
 	if ms.User.Bot {
-		return nil, nil
+		return nil, false, nil
 	}
 
-	// filter by roles
-	filtered := make([]*TriggeredCC, 0, len(matched))
-	for _, v := range matched {
-		if !CmdRunsForUser(v.CC, ms) {
+	// filter by channel and role restrictions
+	filtered := make([]*TriggeredCC, 0, len(triggerMatched))
+	for _, v := range triggerMatched {
+		if !CmdRunsInChannel(v.CC, common.ChannelOrThreadParentID(cs)) || !CmdRunsForUser(v.CC, ms) {
 			continue
 		}
-
 		filtered = append(filtered, v)
+	}
+
+	if len(filtered) < 1 {
+		return nil, true, nil
 	}
 
 	sort.Slice(filtered, func(i, j int) bool {
@@ -229,7 +269,7 @@ func findComponentOrModalTriggerCustomCommands(ctx context.Context, cs *dstate.C
 		filtered = filtered[:limit]
 	}
 
-	return filtered, nil
+	return filtered, false, nil
 }
 
 func ExecuteCustomCommandFromComponent(cc *models.CustomCommand, gs *dstate.GuildSet, cs *dstate.ChannelState, cmdArgs []string, stripped string, interaction *templates.CustomCommandInteraction) error {
@@ -384,7 +424,11 @@ func ExecuteCustomCommandFromModal(cc *models.CustomCommand, gs *dstate.GuildSet
 	}
 	tmplCtx.Data["Values"] = cmdValues
 	tmplCtx.Data["ModalValues"] = modalValues
+
 	msg := interaction.Message
+	if msg == nil {
+		msg = &discordgo.Message{GuildID: gs.ID, ChannelID: cs.ID}
+	}
 	msg.Member = ms.DgoMember()
 	msg.Author = msg.Member.User
 	tmplCtx.Msg = msg

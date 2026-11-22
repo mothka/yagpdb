@@ -36,7 +36,7 @@
                 </a>
             </li>
             <li>
-                <a href="/manage" class="notification-icon" data-toggle="tooltip" data-placement="bottom" title=""
+                <a href="/news" class="notification-icon" data-toggle="tooltip" data-placement="bottom" title=""
                     data-original-title="News and updates">
                     <i class="far fa-newspaper"></i>
                 </a>
@@ -59,7 +59,7 @@
 
         {{if .User}}
         <div id="server-selection" class="userbox">
-            <a href="#" data-toggle="dropdown">
+            <a href="#" data-toggle="dropdown"{{if .ActiveGuild}} title="{{.ActiveGuild.Name}}"{{end}}>
                 <figure class="profile-picture">
                     {{if and .ActiveGuild .ActiveGuild.Icon}}
                     <img src="https://cdn.discordapp.com/icons/{{.ActiveGuild.ID}}/{{.ActiveGuild.Icon}}?size=64"
@@ -69,7 +69,7 @@
                     {{end}}
                 </figure>
                 <div class="profile-info" data-lock-name="Server Name">
-                    <span class="name">{{if .ActiveGuild}}{{.ActiveGuild.Name}}{{if .IsGuildPremium}}<i
+                    <span class="name{{if .IsGuildPremium}} premium-color{{end}}">{{if .ActiveGuild}}{{.ActiveGuild.Name}}{{if .IsGuildPremium}}<i
                             class="fas fa-crown premium-color ml-1"></i>{{end}}{{else}}Loading...{{end}}</span>
                     <span class="role">loading....</span>
                 </div>
@@ -172,6 +172,9 @@
                             <span>Home</span>
                         </a>
                     </li>
+                    {{range (index .SidebarItems "BelowHome")}}
+                    {{template "sidebar_item" (dict "ActiveGuild" $ag "Item" .)}}
+                    {{end}}
                     <li>
                         <a class="nav-link premium-color" data-partial-load="true" href="/manage/{{.ActiveGuild.ID}}/personalizer">
                             <i class="fas fa-user" aria-hidden="true"></i>
@@ -181,86 +184,28 @@
                     {{range (index .SidebarItems "Top")}}
                     {{template "sidebar_item" (dict "ActiveGuild" $ag "Item" .)}}
                     {{end}}
-                    <li class="nav-parent">
-                        <a class="nav-link" href="#">
-                            <i class="fas fa-cogs" aria-hidden="true"></i>
-                            <span>Core</span>
-                        </a>
-                        <ul class="nav nav-children">
-                            {{range (index .SidebarItems "Core")}}
-                            {{template "sidebar_item" (dict "ActiveGuild" $ag "Item" .)}}
-                            {{end}}
-                        </ul>
-                    </li>
-                     <li class="nav-parent">
-                        <a class="nav-link" href="#">
-                            <i class="fas fa-closed-captioning" aria-hidden="true"></i>
-                            <span>Custom Commands</span>
-                        </a>
-                        <ul class="nav nav-children">
-                            {{range (index .SidebarItems "CustomCommands")}}
-                            {{template "sidebar_item" (dict "ActiveGuild" $ag "Item" .)}}
-                            {{end}}
-                        </ul>
-                    </li>
-                    <li class="nav-parent">
-                        <a class="nav-link" href="#">
-                            <i class="fas fa-user-shield" aria-hidden="true"></i>
-                            <span>Moderation</span>
-                        </a>
-                        <ul class="nav nav-children">
-                            {{range (index .SidebarItems "Moderation")}}
-                            {{template "sidebar_item" (dict "ActiveGuild" $ag "Item" .)}}
-                            {{end}}
-                        </ul>
-                    </li>
-                    <li class="nav-parent   ">
-                        <a class="nav-link" href="#">
-                            <i class="fas fa-rss" aria-hidden="true"></i>
-                            <span>Notifications & Feeds</span>
-                        </a>
-                        <ul class="nav nav-children">
-                            {{range (index .SidebarItems "Feeds")}}
-                            {{template "sidebar_item" (dict "ActiveGuild" $ag "Item" .)}}
-                            {{end}}
-                        </ul>
-                    </li>
-                    <li class="nav-parent">
-                        <a class="nav-link" href="#">
-                            <i class="fas fa-tags" aria-hidden="true"></i>
-                            <span>Roles</span>
-                        </a>
-                        <ul class="nav nav-children">
-                            {{range (index .SidebarItems "Roles")}}
-                            {{template "sidebar_item" (dict "ActiveGuild" $ag "Item" .)}}
-                            {{end}}
-                        </ul>
-                    </li>
-                    <li class="nav-parent">
-                        <a class="nav-link" href="#">
-                            <i class="fas fa-bolt" aria-hidden="true"></i>
-                            <span>Tools & Utilities</span>
-                        </a>
-                        <ul class="nav nav-children">
-                            {{range (index .SidebarItems "Tools")}}
-                            {{template "sidebar_item" (dict "ActiveGuild" $ag "Item" .)}}
-                            {{end}}
-                        </ul>
-                    </li>
+                    {{template "sidebar_group" (dict "ActiveGuild" $ag "Name" "Core" "Icon" "fas fa-cogs" "Items" (index .SidebarItems "Core"))}}
+                    {{template "sidebar_group" (dict "ActiveGuild" $ag "Name" "Custom Commands" "Icon" "fas fa-closed-captioning" "Items" (index .SidebarItems "CustomCommands"))}}
+                    {{template "sidebar_group" (dict "ActiveGuild" $ag "Name" "Moderation" "Icon" "fas fa-user-shield" "Items" (index .SidebarItems "Moderation"))}}
+                    {{template "sidebar_group" (dict "ActiveGuild" $ag "Name" "Notifications & Feeds" "Icon" "fas fa-rss" "Items" (index .SidebarItems "Feeds"))}}
+                    {{template "sidebar_group" (dict "ActiveGuild" $ag "Name" "Roles" "Icon" "fas fa-tags" "Items" (index .SidebarItems "Roles"))}}
+                    {{template "sidebar_group" (dict "ActiveGuild" $ag "Name" "Tools & Utilities" "Icon" "fas fa-bolt" "Items" (index .SidebarItems "Tools"))}}
                 
-                    <li class="nav-parent">
-                        <a class="nav-link" href="#">
-                            <i class="fas fa-trophy" aria-hidden="true"></i>
-                            <span>Fun</span>
-                        </a>
-                        <ul class="nav nav-children">
-                            {{range (index .SidebarItems "Fun")}}
-                            {{template "sidebar_item" (dict "ActiveGuild" $ag "Item" .)}}
-                            {{end}}
-                        </ul>
-                    </li>
+                    {{template "sidebar_group" (dict "ActiveGuild" $ag "Name" "Fun" "Icon" "fas fa-trophy" "Items" (index .SidebarItems "Fun"))}}
                     {{end}}
-                    <li class="mt-5">
+                    <li{{if and .ActiveGuild .IsAdmin}} class="mt-5"{{end}}>
+                        <a class="nav-link" href="/manage">
+                            <i class="fas fa-server" aria-hidden="true"></i>
+                            <span>Your servers</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a class="nav-link" href="/news">
+                            <i class="far fa-newspaper" aria-hidden="true"></i>
+                            <span>News and Updates</span>
+                        </a>
+                    </li>
+                    <li>
                         <a class="nav-link" href="https://help.yagpdb.xyz/" target="_blank">
                             <i class="fas fa-question" aria-hidden="true"></i>
                             <span>Documentation</span>
@@ -292,6 +237,22 @@
 {{end}}
 {{end}}
 
+{{define "sidebar_group"}}
+{{$ag := .ActiveGuild}}
+{{$new := false}}{{range .Items}}{{if .IsNew}}{{$new = true}}{{end}}{{end}}
+<li class="nav-parent">
+    <a class="nav-link" href="#">
+        <i class="{{.Icon}}" aria-hidden="true"></i>
+        <span>{{.Name}}{{if $new}}<span class="badge badge-success" style="margin: 0 0 0 .5em;">New!</span>{{end}}</span>
+    </a>
+    <ul class="nav nav-children">
+        {{range .Items}}
+        {{template "sidebar_item" (dict "ActiveGuild" $ag "Item" .)}}
+        {{end}}
+    </ul>
+</li>
+{{end}}
+
 {{define "sidebar_item"}}
 {{$ag := .ActiveGuild}}
 {{$item := .Item}}
@@ -299,7 +260,7 @@
     <a class="nav-link {{if $item.IsPremium}}premium-color{{end}}" {{if not $item.External}}data-partial-load="true"{{else}}target="_blank"{{end}} href="{{if not $item.External}}/manage/{{$ag.ID}}/{{$item.URL}}{{else}}{{$item.URL}}{{end}}">
         {{if $item.Icon}}<i class="{{$item.Icon}}" aria-hidden="true"></i>{{end}}
         {{if $item.CustomIconImage}}<image src="{{$item.CustomIconImage}}" width="24" class="nav-sidebar-icon-custom mr-1" />{{end}}
-        {{if $item.New}}<span class="float-right badge badge-success">New!</span>{{end}}
+        {{if $item.IsNew}}<span class="float-right badge badge-success">New!</span>{{end}}
         <span>{{$item.Name}}</span>
     </a>
 </li>
@@ -307,7 +268,7 @@
 
 
 {{define "cp_guild_selection"}}
-<a href="#" data-toggle="dropdown">
+<a href="#" data-toggle="dropdown"{{if .ActiveGuild}} title="{{.ActiveGuild.Name}}"{{end}}>
     <figure class="profile-picture">
         {{if and .ActiveGuild .ActiveGuild.Icon}}
         <img src="https://cdn.discordapp.com/icons/{{.ActiveGuild.ID}}/{{.ActiveGuild.Icon}}?size=64" alt="Server Icon"
@@ -317,7 +278,7 @@
         {{end}}
     </figure>
     <div class="profile-info" data-lock-name="Server Name">
-        <span class="name">{{if .ActiveGuild}}{{.ActiveGuild.Name}}{{if .IsGuildPremium}}<i
+        <span class="name{{if .IsGuildPremium}} premium-color{{end}}">{{if .ActiveGuild}}{{.ActiveGuild.Name}}{{if .IsGuildPremium}}<i
                 class="fas fa-crown premium-color ml-1"></i>{{end}}{{else}}Select Server{{end}}</span>
         <span class="role">Change server</span>
     </div>
@@ -329,13 +290,23 @@
     <ul class="list-unstyled mb-2" style="max-height: 500px; overflow-y: auto;">
         <li class="divider"></li>
 
+        {{if .ActiveGuild}}
+        {{/* The name is cut short in the header, and phones have no hover to show it. */}}
+        <li>
+            <a role="menuitem" tabindex="-1" href="/manage/{{.ActiveGuild.ID}}/home" class="font-weight-bold" style="white-space: normal; overflow-wrap: anywhere;">
+                <i class="fas fa-check"></i>{{.ActiveGuild.Name}}</a>
+        </li>
+        <li class="divider"></li>
+        {{end}}
+
         {{if .ManagedGuilds}}
 
         {{$clientid := .ClientID}}
         {{$host := .Host}}
         {{$baseURL := .BaseURL}}
+        {{$activeGuildID := 0}}{{if .ActiveGuild}}{{$activeGuildID = .ActiveGuild.ID}}{{end}}
 
-        {{range $index, $element := .ManagedGuilds -}}{{if $element.Connected -}}
+        {{range $index, $element := .ManagedGuilds -}}{{if and $element.Connected (ne $element.ID $activeGuildID) -}}
         <li>
             <a role="menuitem" tabindex="-1" href="/manage/{{$element.ID}}/home">
             {{if $element.Icon}}
@@ -351,8 +322,8 @@
 
         {{range $index, $element := .ManagedGuilds -}}{{if not $element.Connected -}}
         <li>
-            <a
-                href="https://discordapp.com/oauth2/authorize?client_id={{$clientid}}&scope=applications.commands%20bot&permissions=1516122532343&guild_id={{$element.ID}}&response_type=code&redirect_uri={{print $baseURL "/manage"}}"><i
+            <a data-ga-event="bot_invite_started"
+                href="https://discordapp.com/oauth2/authorize?client_id={{$clientid}}&scope=applications.commands%20bot&permissions=2534790912928247&guild_id={{$element.ID}}&response_type=code&redirect_uri={{print $baseURL "/manage"}}"><i
                     class="fas fa-plus"></i>{{$element.Name}}</a>
         </li>
         {{end}}{{end}}

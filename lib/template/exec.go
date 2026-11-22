@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"unsafe"
 
 	"github.com/botlabs-gg/yagpdb/v2/lib/template/parse"
 )
@@ -43,6 +45,8 @@ type state struct {
 	tryDepth    int        // depth of try actions.
 	operations  int
 	returnValue reflect.Value
+
+	allocatedBytes int
 
 	parent *state
 }
@@ -179,7 +183,7 @@ func (f funcCallError) Strip() error {
 }
 
 // errorf records an ExecError and terminates processing.
-func (s *state) errorf(format string, args ...interface{}) {
+func (s *state) errorf(format string, args ...any) {
 	name := doublePercent(s.tmpl.Name())
 	if s.node == nil {
 		format = fmt.Sprintf("template: %s: %s", name, format)
@@ -232,7 +236,7 @@ func errRecover(errp *error) {
 // the output writer.
 // A template may be executed safely in parallel, although if parallel
 // executions share a Writer the output may be interleaved.
-func (t *Template) ExecuteTemplate(wr io.Writer, name string, data interface{}) error {
+func (t *Template) ExecuteTemplate(wr io.Writer, name string, data any) error {
 	var tmpl *Template
 	if t.common != nil {
 		tmpl = t.tmpl[name]
@@ -253,11 +257,22 @@ func (t *Template) ExecuteTemplate(wr io.Writer, name string, data interface{}) 
 //
 // If data is a reflect.Value, the template applies to the concrete
 // value that the reflect.Value holds, as in fmt.Print.
-func (t *Template) Execute(wr io.Writer, data interface{}) error {
+func (t *Template) Execute(wr io.Writer, data any) error {
 	return t.execute(wr, data)
 }
 
-func (t *Template) execute(wr io.Writer, data interface{}) (err error) {
+// ExecuteCountingAlloc is Execute that also reports the bytes charged against MaxAllocBytes,
+// including when execution stopped with an error.
+func (t *Template) ExecuteCountingAlloc(wr io.Writer, data any) (allocatedBytes int, err error) {
+	return t.executeCountingAlloc(wr, data)
+}
+
+func (t *Template) execute(wr io.Writer, data any) error {
+	_, err := t.executeCountingAlloc(wr, data)
+	return err
+}
+
+func (t *Template) executeCountingAlloc(wr io.Writer, data any) (allocatedBytes int, err error) {
 	defer errRecover(&err)
 	value, ok := data.(reflect.Value)
 	if !ok {
@@ -268,6 +283,7 @@ func (t *Template) execute(wr io.Writer, data interface{}) (err error) {
 		wr:   wr,
 		vars: []variable{{"$", value}},
 	}
+	defer func() { allocatedBytes = state.allocatedBytes }()
 	if t.Tree == nil || t.Root == nil {
 		state.errorf("%q is an incomplete or empty template", t.Name())
 	}
@@ -402,7 +418,7 @@ func (s *state) walkIfOrWith(typ parse.NodeType, dot reflect.Value, pipe *parse.
 // IsTrue reports whether the value is 'true', in the sense of not the zero of its type,
 // and whether the value has a meaningful truth value. This is the definition of
 // truth used by if and other such actions.
-func IsTrue(val interface{}) (truth, ok bool) {
+func IsTrue(val any) (truth, ok bool) {
 	return isTrue(reflect.ValueOf(val))
 }
 
@@ -418,7 +434,7 @@ func isTrue(val reflect.Value) (truth, ok bool) {
 		truth = val.Bool()
 	case reflect.Complex64, reflect.Complex128:
 		truth = val.Complex() != 0
-	case reflect.Chan, reflect.Func, reflect.Ptr, reflect.Interface:
+	case reflect.Chan, reflect.Func, reflect.Pointer, reflect.Interface:
 		truth = !val.IsNil()
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		truth = val.Int() != 0
@@ -520,7 +536,7 @@ func (s *state) walkRange(dot reflect.Value, r *parse.RangeNode) controlFlowSign
 			s.errorf("range can't iterate over a negative number")
 			return controlFlowNone
 		}
-		for i := 0; i < intVal; i++ {
+		for i := range intVal {
 			val := reflect.ValueOf(i)
 			switch oneIteration(val, val) {
 			case controlFlowBreak:
@@ -539,7 +555,7 @@ func (s *state) walkRange(dot reflect.Value, r *parse.RangeNode) controlFlowSign
 			s.errorf("range can't iterate over a negative number")
 			return controlFlowNone
 		}
-		for i := 0; i < intVal; i++ {
+		for i := range intVal {
 			val := reflect.ValueOf(i)
 			switch oneIteration(val, val) {
 			case controlFlowBreak:
@@ -615,6 +631,7 @@ func (s *state) walkTemplate(dot reflect.Value, t *parse.TemplateNode) {
 	newState.depth++
 	newState.tmpl = tmpl
 	newState.tmpl.maxOps = s.tmpl.maxOps
+	newState.tmpl.maxAllocBytes = s.tmpl.maxAllocBytes
 	// No dynamic scoping: template invocations inherit no variables.
 	newState.vars = []variable{{"$", dot}}
 
@@ -809,7 +826,7 @@ func (s *state) evalField(dot reflect.Value, fieldName string, node parse.Node, 
 	// Unless it's an interface, need to get to a value of type *T to guarantee
 	// we see all methods of T and *T.
 	ptr := receiver
-	if ptr.Kind() != reflect.Interface && ptr.Kind() != reflect.Ptr && ptr.CanAddr() {
+	if ptr.Kind() != reflect.Interface && ptr.Kind() != reflect.Pointer && ptr.CanAddr() {
 		ptr = ptr.Addr()
 	}
 	if method := ptr.MethodByName(fieldName); method.IsValid() {
@@ -851,7 +868,7 @@ func (s *state) evalField(dot reflect.Value, fieldName string, node parse.Node, 
 			}
 			return result
 		}
-	case reflect.Ptr:
+	case reflect.Pointer:
 		etyp := receiver.Type().Elem()
 		if etyp.Kind() == reflect.Struct {
 			if _, ok := etyp.FieldByName(fieldName); !ok {
@@ -869,11 +886,40 @@ func (s *state) evalField(dot reflect.Value, fieldName string, node parse.Node, 
 }
 
 var (
-	stringType       = reflect.TypeOf("")
-	errorType        = reflect.TypeOf((*error)(nil)).Elem()
-	fmtStringerType  = reflect.TypeOf((*fmt.Stringer)(nil)).Elem()
-	reflectValueType = reflect.TypeOf((*reflect.Value)(nil)).Elem()
+	stringType       = reflect.TypeFor[string]()
+	errorType        = reflect.TypeFor[error]()
+	fmtStringerType  = reflect.TypeFor[fmt.Stringer]()
+	reflectValueType = reflect.TypeFor[reflect.Value]()
 )
+
+// Call argument slices are the single biggest allocation source during
+// execution, and reflect copies them before the callee ever runs, so they can
+// be recycled.
+var argvPool = sync.Pool{
+	New: func() any {
+		s := make([]reflect.Value, 0, 16)
+		return &s
+	},
+}
+
+func getArgv(n int) *[]reflect.Value {
+	p := argvPool.Get().(*[]reflect.Value)
+	if cap(*p) < n {
+		*p = make([]reflect.Value, n)
+	} else {
+		*p = (*p)[:n]
+	}
+	return p
+}
+
+func putArgv(p *[]reflect.Value) {
+	buf := *p
+	for i := range buf {
+		buf[i] = reflect.Value{}
+	}
+	*p = buf[:0]
+	argvPool.Put(p)
+}
 
 // evalCall executes a function or method call. If it's a method, fun already has the receiver bound, so
 // it looks just like a function call. The arg list, if non-nil, includes (in the manner of the shell), arg[0]
@@ -906,7 +952,8 @@ func (s *state) evalCall(dot, fun reflect.Value, node parse.Node, name string, a
 	}
 
 	// Build the arg list.
-	argv := make([]reflect.Value, numIn)
+	argvp := getArgv(numIn)
+	argv := *argvp
 	// Args must be evaluated. Fixed args first.
 	i := 0
 	for ; i < numFixed && i < len(args); i++ {
@@ -939,6 +986,8 @@ func (s *state) evalCall(dot, fun reflect.Value, node parse.Node, name string, a
 	// Special case for builtin execTemplate.
 	if fun == builtinExecTemplate {
 		v := s.callExecTemplate(dot, node, argv)
+		s.chargeAlloc(name, v, nil)
+		putArgv(argvp)
 		if v.Kind() == reflect.String && v.Len() > maxStringLength {
 			s.errorf("function response %s exceeds maximum allowed size", name)
 		}
@@ -946,6 +995,10 @@ func (s *state) evalCall(dot, fun reflect.Value, node parse.Node, name string, a
 	}
 
 	v, panicked, err := safeCall(fun, argv)
+	if err == nil {
+		s.chargeAlloc(name, v, argv)
+	}
+	putArgv(argvp)
 	// If we have an error that is not nil, stop execution and return that
 	// error to the caller.
 	if err != nil {
@@ -999,6 +1052,7 @@ func (s *state) callExecTemplate(dot reflect.Value, node parse.Node, args []refl
 	newState.depth++
 	newState.tmpl = tmpl
 	newState.tmpl.maxOps = s.tmpl.maxOps
+	newState.tmpl.maxAllocBytes = s.tmpl.maxAllocBytes
 	newState.vars = []variable{{"$", newDot}}
 
 	if newState.walk(newDot, tmpl.Root) == controlFlowReturnValue {
@@ -1010,7 +1064,7 @@ func (s *state) callExecTemplate(dot reflect.Value, node parse.Node, args []refl
 // canBeNil reports whether an untyped nil can be assigned to the type. See reflect.Zero.
 func canBeNil(typ reflect.Type) bool {
 	switch typ.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		return true
 	case reflect.Struct:
 		return typ == reflectValueType
@@ -1047,53 +1101,23 @@ func (s *state) validateType(value reflect.Value, typ reflect.Type) reflect.Valu
 		// are much more constrained, so it makes more sense there than here.
 		// Besides, one is almost always all you need.
 		switch {
-		case value.Kind() == reflect.Ptr && value.Type().Elem().AssignableTo(typ):
+		case value.Kind() == reflect.Pointer && value.Type().Elem().AssignableTo(typ):
 			value = value.Elem()
 			if !value.IsValid() {
 				s.errorf("dereference of nil pointer of type %s", typ)
 			}
-		case reflect.PtrTo(value.Type()).AssignableTo(typ) && value.CanAddr():
+		case reflect.PointerTo(value.Type()).AssignableTo(typ) && value.CanAddr():
 			value = value.Addr()
 		default:
 			kind1, _ := basicKindT(typ.Kind())
 			kind2, _ := basicKindT(value.Kind())
 
-			if kind1 == intKind && kind2 == intKind {
-				vc := value.Int()
-				switch typ.Kind() {
-				case reflect.Int:
-					return reflect.ValueOf(int(vc))
-				case reflect.Int8:
-					return reflect.ValueOf(int8(vc))
-				case reflect.Int16:
-					return reflect.ValueOf(int16(vc))
-				case reflect.Int32:
-					return reflect.ValueOf(int32(vc))
-				case reflect.Int64:
-					return reflect.ValueOf(vc)
-				}
-			} else if kind1 == uintKind && kind2 == uintKind {
-				vc := value.Uint()
-				switch typ.Kind() {
-				case reflect.Uint:
-					return reflect.ValueOf(uint(vc))
-				case reflect.Uint8:
-					return reflect.ValueOf(uint8(vc))
-				case reflect.Uint16:
-					return reflect.ValueOf(uint16(vc))
-				case reflect.Uint32:
-					return reflect.ValueOf(uint32(vc))
-				case reflect.Uint64:
-					return reflect.ValueOf(uint64(vc))
-				}
-			} else if kind1 == floatKind && kind2 == floatKind {
-				vc := value.Float()
-				switch typ.Kind() {
-				case reflect.Float64:
-					return reflect.ValueOf(float64(vc))
-				case reflect.Float32:
-					return reflect.ValueOf(float32(vc))
-				}
+			// Convert keeps the declared type, so named types such as
+			// "type Count int" stay assignable after the conversion.
+			sameNumericFamily := kind1 == kind2 &&
+				(kind1 == intKind || kind1 == uintKind || kind1 == floatKind)
+			if sameNumericFamily && value.Type().ConvertibleTo(typ) {
+				return value.Convert(typ)
 			}
 
 			s.errorf("wrong type for value; expected %s; got %s", typ, value.Type())
@@ -1245,7 +1269,7 @@ func (s *state) evalEmptyInterface(dot reflect.Value, n parse.Node) reflect.Valu
 // if it's nil. If the returned bool is true, the returned value's kind will be
 // either a pointer or interface.
 func indirect(v reflect.Value) (rv reflect.Value, isNil bool) {
-	for ; v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface; v = v.Elem() {
+	for ; v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface; v = v.Elem() {
 		if v.IsNil() {
 			return v, true
 		}
@@ -1281,6 +1305,70 @@ func (s *state) printValue(n parse.Node, v reflect.Value) {
 	}
 }
 
+// Accessors hand back values already held by the template rather than allocating new ones.
+var nonAllocatingFuncs = map[string]bool{
+	"index": true,
+	"Get":   true,
+}
+
+func (s *state) chargeAlloc(name string, result reflect.Value, args []reflect.Value) {
+	if s.tmpl.maxAllocBytes == 0 || nonAllocatingFuncs[name] {
+		return
+	}
+
+	if result.Kind() == reflect.Interface && !result.IsNil() {
+		result = result.Elem()
+	}
+
+	var size int
+	switch {
+	case result.Kind() == reflect.String:
+		size = result.Len()
+		if size > 0 && sharesStringArg(result.String(), args) {
+			return
+		}
+	case result.Kind() == reflect.Slice && result.Type().Elem().Kind() == reflect.Uint8:
+		size = result.Len()
+	}
+
+	if size > 0 {
+		s.incrAlloc(size)
+	}
+}
+
+// sharesStringArg reports whether out points into one of the string arguments, as substrings and
+// unchanged results from functions like slice, trimSpace or lower do.
+func sharesStringArg(out string, args []reflect.Value) bool {
+	outStart := uintptr(unsafe.Pointer(unsafe.StringData(out)))
+	for _, arg := range args {
+		if arg.Kind() == reflect.Interface && !arg.IsNil() {
+			arg = arg.Elem()
+		}
+		if arg.Kind() != reflect.String || arg.Len() == 0 {
+			continue
+		}
+
+		argStr := arg.String()
+		argStart := uintptr(unsafe.Pointer(unsafe.StringData(argStr)))
+		if outStart >= argStart && outStart < argStart+uintptr(len(argStr)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *state) incrAlloc(size int) {
+	if s.parent != nil {
+		s.parent.incrAlloc(size)
+		return
+	}
+
+	s.allocatedBytes += size
+	if s.allocatedBytes > s.tmpl.maxAllocBytes {
+		s.errorf("exceeded max memory allocation (%dMB)", s.tmpl.maxAllocBytes>>20)
+	}
+}
+
 func (s *state) incrOPs(num int) {
 	if s.tmpl.maxOps == 0 {
 		return
@@ -1299,8 +1387,8 @@ func (s *state) incrOPs(num int) {
 
 // printableValue returns the, possibly indirected, interface value inside v that
 // is best for a call to formatted printer.
-func printableValue(v reflect.Value) (interface{}, bool) {
-	if v.Kind() == reflect.Ptr {
+func printableValue(v reflect.Value) (any, bool) {
+	if v.Kind() == reflect.Pointer {
 		v, _ = indirect(v) // fmt.Fprint handles nil.
 	}
 	if !v.IsValid() {
@@ -1308,7 +1396,7 @@ func printableValue(v reflect.Value) (interface{}, bool) {
 	}
 
 	if !v.Type().Implements(errorType) && !v.Type().Implements(fmtStringerType) {
-		if v.CanAddr() && (reflect.PtrTo(v.Type()).Implements(errorType) || reflect.PtrTo(v.Type()).Implements(fmtStringerType)) {
+		if v.CanAddr() && (reflect.PointerTo(v.Type()).Implements(errorType) || reflect.PointerTo(v.Type()).Implements(fmtStringerType)) {
 			v = v.Addr()
 		} else {
 			switch v.Kind() {

@@ -49,7 +49,7 @@ var (
 
 	acceptingRequests *int32
 
-	globalTemplateData = TemplateData(make(map[string]interface{}))
+	globalTemplateData = TemplateData(make(map[string]any))
 
 	StartedAt = time.Now()
 
@@ -70,10 +70,6 @@ var (
 	ConfAdsTxt = config.RegisterOption("yagpdb.ads.ads_txt", "Path to the ads.txt file for monetization using ad networks", "")
 
 	confDisableRequestLogging = config.RegisterOption("yagpdb.disable_request_logging", "Disable logging of http requests to web server", false)
-
-	// can be overriden by plugins
-	// main prurpose is to plug in a onboarding process through a properietary plugin
-	SelectServerHomePageHandler http.Handler = RenderHandler(HandleSelectServer, "cp_selectserver")
 )
 
 type Advertisement struct {
@@ -123,7 +119,7 @@ func loadTemplates() {
 
 	coreTemplates := []string{
 		"templates/index.html", "templates/cp_main.html",
-		"templates/cp_nav.html", "templates/cp_selectserver.html", "templates/cp_logs.html",
+		"templates/cp_nav.html", "templates/cp_selectserver.html", "templates/cp_news.html", "templates/cp_logs.html",
 		"templates/status.html", "templates/cp_server_home.html", "templates/cp_core_settings.html",
 	}
 
@@ -156,6 +152,10 @@ func Run() {
 	AddGlobalTemplateData("Version", common.VERSION)
 	AddGlobalTemplateData("Testing", common.Testing)
 
+	if strings.HasPrefix(confGAID.GetString(), "UA-") {
+		logger.Errorf("yagpdb.ga_id is %q, a Universal Analytics property. Google stopped collecting for those on 2023-07-01, so no analytics are being recorded. Replace it with a GA4 measurement id (G-XXXXXXXXXX).", confGAID.GetString())
+	}
+
 	if properAddresses {
 		ListenAddressHTTP = ":80"
 		ListenAddressHTTPS = ":443"
@@ -178,6 +178,7 @@ func Run() {
 	}
 
 	loadAd()
+	loadLandingComponentEmbed()
 
 	logger.Info("Running webservers")
 	runServers(mux)
@@ -194,8 +195,8 @@ func loadAd() {
 		Height:  confAdHeight.GetInt(),
 	}
 
-	videos := strings.Split(ConfAdVideos.GetString(), ",")
-	for _, v := range videos {
+	videos := strings.SplitSeq(ConfAdVideos.GetString(), ",")
+	for v := range videos {
 		if v == "" {
 			continue
 		}
@@ -305,8 +306,12 @@ func setupRoutes() *goji.Mux {
 	ServerPublicAPIMux.Handle(pat.Get("/status.json"), RequireActiveServer(APIHandler(HandleGuildStatusJSON)))
 
 	// Server selection has its own handler
-	RootMux.Handle(pat.Get("/manage"), SelectServerHomePageHandler)
-	RootMux.Handle(pat.Get("/manage/"), SelectServerHomePageHandler)
+	selectServerHandler := SendAddedServerToSetup(RenderHandler(HandleSelectServer, "cp_selectserver"))
+	RootMux.Handle(pat.Get("/manage"), selectServerHandler)
+	RootMux.Handle(pat.Get("/manage/"), selectServerHandler)
+	newsHandler := RenderHandler(HandleNews, "cp_news")
+	RootMux.Handle(pat.Get("/news"), newsHandler)
+	RootMux.Handle(pat.Get("/news/"), newsHandler)
 	RootMux.Handle(pat.Get("/status"), ControllerHandler(HandleStatusHTML, "cp_status"))
 	RootMux.Handle(pat.Get("/status/"), ControllerHandler(HandleStatusHTML, "cp_status"))
 	RootMux.Handle(pat.Get("/status.json"), APIHandler(HandleStatusJSON))
@@ -403,11 +408,12 @@ func setupRootMux() {
 	mux.Use(SkipStaticMW(BaseTemplateDataMiddleware))
 	mux.Use(SkipStaticMW(SessionMiddleware))
 	mux.Use(SkipStaticMW(UserInfoMiddleware))
-	mux.Use(SkipStaticMW(CSRFProtectionMW))
+	mux.Use(SkipStaticMW(newCSRFProtection().Handler))
 	mux.Use(addPromCountMW)
 
 	// General handlers
 	mux.Handle(pat.Get("/"), ControllerHandler(HandleLandingPage, "index"))
+	mux.HandleFunc(pat.Get("/component-embed.json"), HandleLandingComponentEmbed)
 	mux.HandleFunc(pat.Get("/login"), HandleLogin)
 	mux.HandleFunc(pat.Get("/confirm_login"), HandleConfirmLogin)
 	mux.HandleFunc(pat.Get("/logout"), HandleLogout)
@@ -417,7 +423,7 @@ func httpsRedirHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "https://"+r.Host+r.URL.String(), http.StatusMovedPermanently)
 }
 
-func AddGlobalTemplateData(key string, data interface{}) {
+func AddGlobalTemplateData(key string, data any) {
 	globalTemplateData[key] = data
 }
 
@@ -443,6 +449,7 @@ func loadCoreHTMLTemplate(path string) {
 
 const (
 	SidebarCategoryTopLevel       = "Top"
+	SidebarCategoryBelowHome      = "BelowHome"
 	SidebarCategoryFeeds          = "Feeds"
 	SidebarCategoryRoles          = "Roles"
 	SidebarCategoryTools          = "Tools"
@@ -458,8 +465,13 @@ type SidebarItem struct {
 	Icon            string
 	CustomIconImage string
 	New             bool
+	NewUntil        time.Time
 	External        bool
 	IsPremium       bool
+}
+
+func (s *SidebarItem) IsNew() bool {
+	return s.New || time.Now().Before(s.NewUntil)
 }
 
 var sideBarItems = make(map[string][]*SidebarItem)

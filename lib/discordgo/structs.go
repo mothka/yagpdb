@@ -294,6 +294,12 @@ type Channel struct {
 	// The default forum layout view used to display posts in forum channels.
 	// Defaults to ForumLayoutNotSet, which indicates a layout view has not been set by a channel admin.
 	DefaultForumLayout ForumLayout `json:"default_forum_layout"`
+
+	// The invoking member's permissions in the channel, only set on channels resolved in interactions.
+	Permissions int64 `json:"permissions,string,omitempty"`
+
+	// The bot's permissions in the channel, only set on channels resolved in interactions.
+	AppPermissions int64 `json:"app_permissions,string,omitempty"`
 }
 
 func (c *Channel) GetChannelID() int64 {
@@ -321,6 +327,8 @@ const (
 	ChannelFlagsRequireTag ChannelFlags = 1 << 4
 	// ChannelFlagsHideMediaDownloadOptions when set hides the embedded media download options. Available only for media channels.
 	ChannelFlagsHideMediaDownloadOptions ChannelFlags = 1 << 15
+	// ChannelFlagsObfuscated is set on channels the bot cannot view, all fields other than id, type, position and parent_id are unreliable.
+	ChannelFlagsObfuscated ChannelFlags = 1 << 17
 )
 
 // A ChannelEdit holds Channel Field data for a channel edit.
@@ -694,6 +702,13 @@ type GuildParams struct {
 	Splash                      string             `json:"splash,omitempty"`
 }
 
+// A Colors holds information about a Discord guild role's colors
+type Colors struct {
+	PrimaryColor   int32 `json:"primary_color"`
+	SecondaryColor int32 `json:"secondary_color"`
+	TertiaryColor  int32 `json:"tertiary_color"`
+}
+
 // A Role stores information about Discord guild member roles.
 type Role struct {
 	// The ID of the role.
@@ -712,8 +727,11 @@ type Role struct {
 	// Whether this role is hoisted (shows up separately in member list).
 	Hoist bool `json:"hoist"`
 
-	// The hex color of this role.
+	// Deprecated: The hex color of this role.
 	Color int `json:"color"`
+
+	// The colors for this role
+	Colors *Colors `json:"colors"`
 
 	// The position of this role in the guild's role hierarchy.
 	Position int `json:"position"`
@@ -725,6 +743,21 @@ type Role struct {
 
 	// The hash of the role icon. Use .IconURL to retrieve the icon's URL.
 	Icon string `json:"icon"`
+
+	// The ID of the guild the role belongs to, discord does not send this, it is set by the state.
+	GuildID int64 `json:"guild_id,string,omitempty"`
+}
+
+// RoleMemberCountFetcher looks up the number of members with a role, set by the bot as discordgo has no cache of its own.
+var RoleMemberCountFetcher func(guildID, roleID int64) (int, error)
+
+// MemberCount returns the number of members with the role, only available on roles that have their GuildID set.
+func (r *Role) MemberCount() (int, error) {
+	if r.GuildID == 0 || RoleMemberCountFetcher == nil {
+		return 0, errors.New("member count is not available for this role")
+	}
+
+	return RoleMemberCountFetcher(r.GuildID, r.ID)
 }
 
 // Mention returns a string which mentions the role
@@ -842,8 +875,8 @@ type Activity struct {
 	URL        string       `json:"url,omitempty"`
 	Details    string       `json:"details,omitempty"`
 	State      string       `json:"state,omitempty"`
-	TimeStamps TimeStamps   `json:"timestamps,omitempty"`
-	Assets     Assets       `json:"assets,omitempty"`
+	TimeStamps TimeStamps   `json:"timestamps"`
+	Assets     Assets       `json:"assets"`
 	Instance   int8         `json:"instance,omitempty"`
 }
 
@@ -1164,6 +1197,7 @@ const (
 	AuditLogActionChannelOverwriteCreate AuditLogAction = 13
 	AuditLogActionChannelOverwriteUpdate AuditLogAction = 14
 	AuditLogActionChannelOverwriteDelete AuditLogAction = 15
+	AuditLogActionChannelPositionUpdate  AuditLogAction = 16
 
 	AuditLogActionMemberKick       AuditLogAction = 20
 	AuditLogActionMemberPrune      AuditLogAction = 21
@@ -1175,9 +1209,10 @@ const (
 	AuditLogActionMemberDisconnect AuditLogAction = 27
 	AuditLogActionBotAdd           AuditLogAction = 28
 
-	AuditLogActionRoleCreate AuditLogAction = 30
-	AuditLogActionRoleUpdate AuditLogAction = 31
-	AuditLogActionRoleDelete AuditLogAction = 32
+	AuditLogActionRoleCreate         AuditLogAction = 30
+	AuditLogActionRoleUpdate         AuditLogAction = 31
+	AuditLogActionRoleDelete         AuditLogAction = 32
+	AuditLogActionRolePositionUpdate AuditLogAction = 33
 
 	AuditLogActionInviteCreate AuditLogAction = 40
 	AuditLogActionInviteUpdate AuditLogAction = 41
@@ -1222,12 +1257,15 @@ const (
 	AuditLogActionAutoModerationBlockMessage              AuditLogAction = 143
 	AuditLogActionAutoModerationFlagToChannel             AuditLogAction = 144
 	AuditLogActionAutoModerationUserCommunicationDisabled AuditLogAction = 145
+
+	AuditLogActionVoiceChannelStatusUpdate AuditLogAction = 192
+	AuditLogActionVoiceChannelStatusDelete AuditLogAction = 193
 )
 
 // AuditLogChange for an AuditLogEntry
 type AuditLogChange struct {
-	NewValue interface{}        `json:"new_value"`
-	OldValue interface{}        `json:"old_value"`
+	NewValue any                `json:"new_value"`
+	OldValue any                `json:"old_value"`
 	Key      *AuditLogChangeKey `json:"key"`
 }
 
@@ -1392,6 +1430,8 @@ type AuditLogOptions struct {
 	ID               string               `json:"id"`
 	Type             *AuditLogOptionsType `json:"type"`
 	RoleName         string               `json:"role_name"`
+	// The new status on voice channel status updates
+	Status string `json:"status"`
 }
 
 // AuditLogOptionsType of the AuditLogOption
@@ -1600,10 +1640,16 @@ type InviteUser struct {
 
 type CreateApplicationCommandRequest struct {
 	Name              string                      `json:"name"`                         // 1-32 character name matching ^[\w-]{1,32}$
-	Description       string                      `json:"description"`                  // 1-100 character description
-	Options           []*ApplicationCommandOption `json:"options"`                      // the parameters for the command
+	Type              ApplicationCommandType      `json:"type,omitempty"`               // defaults to CHAT_INPUT (1); 2=USER, 3=MESSAGE context menu
+	Description       string                      `json:"description,omitempty"`        // 1-100 character description (must be empty for context menu commands)
+	Options           []*ApplicationCommandOption `json:"options,omitempty"`            // the parameters for the command
 	DefaultPermission *bool                       `json:"default_permission,omitempty"` // (default true)	whether the command is enabled by default when the app is added to a guild
 	NSFW              bool                        `json:"nsfw,omitempty"`               // marks a command as age-restricted
+
+	// Permission bits a member must have for the command to be shown to them.
+	// Replaces the deprecated DefaultPermission. Nil leaves the command visible
+	// to everyone, a value of 0 hides it from everyone but administrators.
+	DefaultMemberPermissions *int64 `json:"default_member_permissions,string,omitempty"`
 }
 
 func (a *ApplicationCommandInteractionDataResolved) UnmarshalJSON(b []byte) error {
@@ -1614,10 +1660,12 @@ func (a *ApplicationCommandInteractionDataResolved) UnmarshalJSON(b []byte) erro
 	}
 
 	*a = ApplicationCommandInteractionDataResolved{
-		Users:    make(map[int64]*User),
-		Members:  make(map[int64]*Member),
-		Roles:    make(map[int64]*Role),
-		Channels: make(map[int64]*Channel),
+		Users:       make(map[int64]*User),
+		Members:     make(map[int64]*Member),
+		Roles:       make(map[int64]*Role),
+		Channels:    make(map[int64]*Channel),
+		Messages:    make(map[int64]*Message),
+		Attachments: make(map[int64]*MessageAttachment),
 	}
 
 	for k, v := range temp.Channels {
@@ -1652,14 +1700,32 @@ func (a *ApplicationCommandInteractionDataResolved) UnmarshalJSON(b []byte) erro
 		a.Users[parsed] = v
 	}
 
+	for k, v := range temp.Messages {
+		parsed, err := strconv.ParseInt(k, 10, 64)
+		if err != nil {
+			return err
+		}
+		a.Messages[parsed] = v
+	}
+
+	for k, v := range temp.Attachments {
+		parsed, err := strconv.ParseInt(k, 10, 64)
+		if err != nil {
+			return err
+		}
+		a.Attachments[parsed] = v
+	}
+
 	return nil
 }
 
 type applicationCommandInteractionDataResolvedTemp struct {
-	Users    map[string]*User    `json:"users"`
-	Members  map[string]*Member  `json:"members"`
-	Roles    map[string]*Role    `json:"roles"`
-	Channels map[string]*Channel `json:"channels"`
+	Users       map[string]*User              `json:"users"`
+	Members     map[string]*Member            `json:"members"`
+	Roles       map[string]*Role              `json:"roles"`
+	Channels    map[string]*Channel           `json:"channels"`
+	Messages    map[string]*Message           `json:"messages"`
+	Attachments map[string]*MessageAttachment `json:"attachments"`
 }
 
 type applicationCommandInteractionDataOptionTemporary struct {
@@ -1697,13 +1763,20 @@ func (a *ApplicationCommandInteractionDataOption) UnmarshalJSON(b []byte) error 
 		v := false
 		err = json.Unmarshal(temp.Value, &v)
 		a.Value = v
-	case ApplicationCommandOptionUser, ApplicationCommandOptionChannel, ApplicationCommandOptionRole:
-		// parse the snowflake
+	case ApplicationCommandOptionUser, ApplicationCommandOptionChannel, ApplicationCommandOptionRole, ApplicationCommandOptionMentionable, ApplicationCommandOptionAttachment:
 		v := ""
-		err = json.Unmarshal(temp.Value, &v)
-		if err == nil {
+		if err = json.Unmarshal(temp.Value, &v); err == nil {
 			a.Value, err = strconv.ParseInt(v, 10, 64)
+		} else {
+			var n int64
+			if err = json.Unmarshal(temp.Value, &n); err == nil {
+				a.Value = n
+			}
 		}
+	case ApplicationCommandOptionNumber:
+		v := float64(0)
+		err = json.Unmarshal(temp.Value, &v)
+		a.Value = v
 	case ApplicationCommandOptionSubCommand:
 	case ApplicationCommandOptionSubCommandGroup:
 	}
@@ -1998,7 +2071,7 @@ type Subscription struct {
 	CurrentPeriodEnd time.Time          `json:"current_period_end"`
 	Status           SubscriptionStatus `json:"status"`
 	// Only present if the subscription status is Ending or Inactive, represents the time when the subscription was cancelled
-	CancelledAt time.Time `json:"cancelled_at,omitempty"`
+	CancelledAt time.Time `json:"cancelled_at"`
 }
 
 // SubscriptionFilterOptions are the options for filtering Subscriptions for list subscriptions API

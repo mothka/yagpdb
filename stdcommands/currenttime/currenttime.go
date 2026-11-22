@@ -11,11 +11,13 @@ import (
 )
 
 var Command = &commands.YAGCommand{
-	CmdCategory:    commands.CategoryTool,
-	Name:           "CurrentTime",
-	Aliases:        []string{"ctime", "gettime"},
-	Description:    "Shows current time in different timezones. [Available timezones](https://pastebin.com/ZqSPUhc7)",
-	ArgumentCombos: [][]int{{1}, {0}, {}},
+	CmdCategory:         commands.CategoryTool,
+	Name:                "CurrentTime",
+	Aliases:             []string{"ctime", "gettime"},
+	Description:         "Shows current time in different timezones. [Available timezones](https://pastebin.com/ZqSPUhc7)",
+	ArgumentCombos:      [][]int{{1}, {0}, {}},
+	SlashCommandEnabled: true,
+	DefaultEnabled:      true,
 	Arguments: []*dcmd.ArgDef{
 		{Name: "Zone", Type: dcmd.String},
 		{Name: "Offset", Type: dcmd.Int},
@@ -23,7 +25,7 @@ var Command = &commands.YAGCommand{
 	RunFunc: cmdFuncCurrentTime,
 }
 
-func cmdFuncCurrentTime(data *dcmd.Data) (interface{}, error) {
+func cmdFuncCurrentTime(data *dcmd.Data) (any, error) {
 	const format = "Mon Jan 02 15:04:05 (UTC -07:00)"
 
 	now := time.Now()

@@ -23,7 +23,7 @@ func init() {
 
 // PublishRatelimit publishes a new global ratelimit hit on discord
 func PublishRatelimit(rl *discordgo.RateLimit) {
-	logger.Printf("Got 429: %s, %s", rl.Bucket, rl.RetryAfterDur())
+	logger.Warnf("Got global 429 on %s, pausing all discord requests from every node on host %s for %s", rl.Bucket, hostname, rl.RetryAfterDur())
 
 	reset := time.Now().Add(rl.RetryAfterDur())
 	err := Publish("global_ratelimit", -1, &globalRatelimitTriggeredEventData{
@@ -47,6 +47,7 @@ func handleGlobalRatelimtPusub(evt *Event) {
 	if data.SourceHost == "" || hostname == "" || data.SourceHost != hostname {
 		return
 	}
+	logger.Warnf("Pausing all discord requests until %s, a node on this host got a global 429 on %s", data.Reset.UTC().Format(time.RFC3339), data.Bucket)
 	common.BotSession.Ratelimiter.SetGlobalTriggered(data.Reset)
 }
 
@@ -74,7 +75,7 @@ func handleEvictCacheSet(evt *Event) {
 }
 
 // EvictCacheSet sends a pubsub to evict the key on slot on all nodes if guildID is set to -1, otherwise the bot worker for that guild is the only one that handles it
-func EvictCacheSet(slot *cacheset.Slot, key interface{}) {
+func EvictCacheSet(slot *cacheset.Slot, key any) {
 	slot.Delete(key)
 
 	marshalledKey, err := json.Marshal(key)

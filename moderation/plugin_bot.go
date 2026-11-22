@@ -43,13 +43,41 @@ var _ commands.CommandProvider = (*Plugin)(nil)
 var _ bot.BotInitHandler = (*Plugin)(nil)
 var _ bot.ShardMigrationReceiver = (*Plugin)(nil)
 
+var warningsLegacyNames = map[string][]string{
+	"Edit":   {"editwarning"},
+	"Delete": {"delwarning", "dw", "delwarn", "deletewarning"},
+	"Clear":  {"clearwarnings", "clw"},
+	"Top":    {"topwarnings", "topwarns"},
+}
+
 func (p *Plugin) AddCommands() {
-	commands.AddRootCommands(p, ModerationCommands...)
+	container, _ := commands.CommandSystem.Root.Sub("warnings", "warns")
+	container.Description = "Inspect and manage warnings"
+
+	for _, cmd := range ModerationCommands {
+		legacy, isWarningSubcommand := warningsLegacyNames[cmd.Name]
+		if !isWarningSubcommand && cmd.Name != "List" {
+			commands.AddRootCommands(p, cmd)
+			continue
+		}
+
+		cmd.SlashCommandEnabled = false
+		commands.AddContainerCommand(container, cmd)
+
+		if isWarningSubcommand {
+			commands.AddRootAliases(p, cmd, legacy...)
+		}
+	}
+
+	commands.RegisterSlashCommandsContainer(container, false, func(gs *dstate.GuildSet) ([]int64, error) {
+		return nil, nil
+	})
 }
 
 func (p *Plugin) BotInit() {
 	scheduledevents2.RegisterHandler("moderation_unmute", ScheduledUnmuteData{}, handleScheduledUnmute)
 	scheduledevents2.RegisterHandler("moderation_unban", ScheduledUnbanData{}, handleScheduledUnban)
+	scheduledevents2.RegisterHandler(banAppealFiledEvent, BanAppealFiledData{}, handleBanAppealFiled)
 	scheduledevents2.RegisterLegacyMigrater("unmute", handleMigrateScheduledUnmute)
 	scheduledevents2.RegisterLegacyMigrater("mod_unban", handleMigrateScheduledUnban)
 
@@ -57,6 +85,9 @@ func (p *Plugin) BotInit() {
 	eventsystem.AddHandlerAsyncLast(p, LockMemberMuteMW(HandleGuildMemberUpdate), eventsystem.EventGuildMemberUpdate)
 
 	eventsystem.AddHandlerAsyncLast(p, HandleGuildAuditLogEntryCreate, eventsystem.EventGuildAuditLogEntryCreate)
+	eventsystem.AddHandlerAsyncLast(p, handleGuildBanRemoveCloseAppeal, eventsystem.EventGuildBanRemove)
+	bot.RegisterDMInteractionHandler(banAppealButtonCustomIDPrefix, handleBanAppealDMInteraction)
+	eventsystem.AddHandlerAsyncLast(p, handleBanAppealReviewInteraction, eventsystem.EventInteractionCreate)
 
 	eventsystem.AddHandlerAsyncLastLegacy(p, HandleGuildCreate, eventsystem.EventGuildCreate)
 	eventsystem.AddHandlerAsyncLast(p, HandleChannelCreateUpdate, eventsystem.EventChannelCreate, eventsystem.EventChannelUpdate)
@@ -86,7 +117,7 @@ var configCache = ccache.New(ccache.Configure().MaxSize(15000))
 func BotCachedGetConfig(guildID int64) (*Config, error) {
 	const cacheDuration = 10 * time.Minute
 
-	item, err := configCache.Fetch(cacheKey(guildID), cacheDuration, func() (interface{}, error) {
+	item, err := configCache.Fetch(cacheKey(guildID), cacheDuration, func() (any, error) {
 		return FetchConfig(guildID)
 	})
 	if err != nil {
@@ -111,7 +142,7 @@ type ScheduledUnbanData struct {
 	UserID int64 `json:"user_id"`
 }
 
-func (p *Plugin) ShardMigrationReceive(evt dshardorchestrator.EventType, data interface{}) {
+func (p *Plugin) ShardMigrationReceive(evt dshardorchestrator.EventType, data any) {
 	if evt == bot.EvtMember {
 		ms := data.(*dstate.MemberState)
 		if ms.User.ID == common.BotUser.ID {
@@ -429,11 +460,12 @@ func LockMemberMuteMW(next eventsystem.HandlerFunc) eventsystem.HandlerFunc {
 
 		var userID int64
 		// TODO: add utility functions to the eventdata struct for fetching things like these?
-		if evt.Type == eventsystem.EventGuildMemberAdd {
+		switch evt.Type {
+		case eventsystem.EventGuildMemberAdd:
 			userID = evt.GuildMemberAdd().User.ID
-		} else if evt.Type == eventsystem.EventGuildMemberUpdate {
+		case eventsystem.EventGuildMemberUpdate:
 			userID = evt.GuildMemberUpdate().User.ID
-		} else {
+		default:
 			panic("Unknown event in lock memebr mute middleware")
 		}
 
@@ -603,7 +635,7 @@ func handleMigrateScheduledUnban(t time.Time, data string) error {
 	})
 }
 
-func handleScheduledUnmute(evt *seventsmodels.ScheduledEvent, data interface{}) (retry bool, err error) {
+func handleScheduledUnmute(evt *seventsmodels.ScheduledEvent, data any) (retry bool, err error) {
 	unmuteData := data.(*ScheduledUnmuteData)
 
 	member, err := bot.GetMember(evt.GuildID, unmuteData.UserID)
@@ -623,7 +655,7 @@ const (
 	scheduledUnbanReason = "Timed ban expired"
 )
 
-func handleScheduledUnban(evt *seventsmodels.ScheduledEvent, data interface{}) (retry bool, err error) {
+func handleScheduledUnban(evt *seventsmodels.ScheduledEvent, data any) (retry bool, err error) {
 	unbanData := data.(*ScheduledUnbanData)
 
 	guildID := evt.GuildID

@@ -14,7 +14,7 @@ var Command = &commands.YAGCommand{
 	CmdCategory:     commands.CategoryFun,
 	Name:            "Roll",
 	Description:     "Roll dices, specify nothing for 6 sides, specify a number for max sides, or rpg dice syntax.",
-	LongDescription: "Example: `-roll 2d6`",
+	LongDescription: "Example: `/fun roll 2d6`",
 	Arguments: []*dcmd.ArgDef{
 		{Name: "Sides", Default: 0, Type: dcmd.Int},
 		{Name: "RPG-Dice", Type: dcmd.String},
@@ -22,12 +22,12 @@ var Command = &commands.YAGCommand{
 	ArgumentCombos:      [][]int{{0}, {1}, {}},
 	DefaultEnabled:      true,
 	SlashCommandEnabled: true,
-	RunFunc: func(data *dcmd.Data) (interface{}, error) {
+	RunFunc: func(data *dcmd.Data) (any, error) {
 		if data.Args[1].Value != nil {
 			// Special dice syntax if string
 			r, _, err := dice.Roll(strings.ToLower(data.Args[1].Str()))
 			if err != nil {
-				return "Bad roll format. See `-help roll` for the supported syntax (e.g. `2d6`).", nil
+				return "Bad roll format. See `/help roll` for the supported syntax (e.g. `2d6`).", nil
 			}
 
 			output := r.String()

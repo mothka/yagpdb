@@ -1,12 +1,17 @@
 package bot
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/url"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"emperror.dev/errors"
 	"github.com/botlabs-gg/yagpdb/v2/bot/eventsystem"
@@ -56,12 +61,45 @@ func addBotHandlers() {
 }
 
 var (
-	connectedGuildsCache = common.CacheSet.RegisterSlot("bot_connected_guilds", func(_ interface{}) (interface{}, error) {
+	connectedGuildsCache = common.CacheSet.RegisterSlot("bot_connected_guilds", func(_ any) (any, error) {
 		var listedServers []int64
 		err := common.RedisPool.Do(radix.Cmd(&listedServers, "SMEMBERS", "connected_guilds"))
 		return listedServers, err
 	}, 0)
 )
+
+var (
+	// guilds redis already knows we are connected to, snapshotted on READY. discord
+	// replays a GuildCreate for every guild at once after a reconnect, and for these
+	// there is nothing to write, so knowing about them up front saves a redis round
+	// trip per guild on the shard's only event worker.
+	knownGuildsMU sync.RWMutex
+	knownGuilds   = make(map[int64]struct{})
+)
+
+func isGuildKnown(guildID int64) bool {
+	knownGuildsMU.RLock()
+	defer knownGuildsMU.RUnlock()
+
+	_, ok := knownGuilds[guildID]
+	return ok
+}
+
+func markGuildKnown(guildIDs ...int64) {
+	knownGuildsMU.Lock()
+	defer knownGuildsMU.Unlock()
+
+	for _, guildID := range guildIDs {
+		knownGuilds[guildID] = struct{}{}
+	}
+}
+
+func forgetGuild(guildID int64) {
+	knownGuildsMU.Lock()
+	defer knownGuildsMU.Unlock()
+
+	delete(knownGuilds, guildID)
+}
 
 func HandleReady(data *eventsystem.EventData) {
 	evt := data.Ready()
@@ -86,29 +124,46 @@ func HandleReady(data *eventsystem.EventData) {
 		logger.WithError(err).Error("Failed retrieving connected servers")
 	}
 
+	// banned servers still have to go through the full check on GuildCreate so we leave
+	// them again, so they never make it into the known set
+	var bannedServers []int64
+	if err := common.RedisPool.Do(radix.Cmd(&bannedServers, "SMEMBERS", "banned_servers")); err != nil {
+		logger.WithError(err).Error("Failed retrieving banned servers")
+	}
+
+	banned := make(map[int64]struct{}, len(bannedServers))
+	for _, v := range bannedServers {
+		banned[v] = struct{}{}
+	}
+
+	guilds := make([]int64, len(evt.Guilds))
+	readyGuilds := make(map[int64]struct{}, len(evt.Guilds))
+	for i, v := range evt.Guilds {
+		guilds[i] = v.ID
+		readyGuilds[v.ID] = struct{}{}
+	}
+
 	numShards := ShardManager.GetNumShards()
 
-OUTER:
+	stillConnected := make([]int64, 0, len(evt.Guilds))
 	for _, v := range listedServers {
 		shard := (v >> 22) % int64(numShards)
 		if int(shard) != data.Session.ShardID {
 			continue
 		}
 
-		for _, readyGuild := range evt.Guilds {
-			if readyGuild.ID == v {
-				continue OUTER
-			}
+		if _, ok := readyGuilds[v]; !ok {
+			logger.Info("Left server while bot was down: ", v)
+			go guildRemoved(v)
+			continue
 		}
 
-		logger.Info("Left server while bot was down: ", v)
-		go guildRemoved(v)
+		if _, isBanned := banned[v]; !isBanned {
+			stillConnected = append(stillConnected, v)
+		}
 	}
 
-	guilds := make([]int64, len(evt.Guilds))
-	for i, v := range evt.Guilds {
-		guilds[i] = v.ID
-	}
+	markGuildKnown(stillConnected...)
 
 	featureflags.BatchInitCache(guilds)
 }
@@ -132,33 +187,39 @@ func HandleGuildCreate(evt *eventsystem.EventData) (retry bool, err error) {
 		"guild":  g.ID,
 	}).Debug("Joined guild")
 
-	saddRes := 0
-	isBanned := false
+	// guilds we already knew about at READY have nothing to write here, and after a
+	// reconnect that is every guild on the shard arriving at once
+	if !isGuildKnown(g.ID) {
+		saddRes := 0
+		isBanned := false
 
-	err = common.RedisPool.Do(radix.Pipeline(
-		radix.Cmd(&saddRes, "SADD", "connected_guilds", discordgo.StrID(g.ID)),
-		radix.Cmd(&isBanned, "SISMEMBER", "banned_servers", discordgo.StrID(g.ID)),
-	))
-	if err != nil {
-		return true, errors.WithStackIf(err)
-	}
-
-	// check if this server is new
-	if saddRes > 0 {
-		logger.WithField("g_name", g.Name).WithField("guild", g.ID).Info("Joined new guild!")
-		go eventsystem.EmitEvent(eventsystem.NewEventData(nil, eventsystem.EventNewGuild, g), eventsystem.EventNewGuild)
-
-		metricsJoinedGuilds.Inc()
-		commonEventsTotal.With(prometheus.Labels{"type": "Guild Create"}).Inc()
-	}
-
-	// check if the server is banned from using the bot
-	if isBanned {
-		logger.WithField("guild", g.ID).Info("Banned server tried to add bot back")
-		common.BotSession.ChannelMessageSend(g.ID, "This server is banned from using this bot. Join the support server for more info.")
-		err = common.BotSession.GuildLeave(g.ID)
+		err = common.RedisPool.Do(radix.Pipeline(
+			radix.Cmd(&saddRes, "SADD", "connected_guilds", discordgo.StrID(g.ID)),
+			radix.Cmd(&isBanned, "SISMEMBER", "banned_servers", discordgo.StrID(g.ID)),
+		))
 		if err != nil {
-			return CheckDiscordErrRetry(err), errors.WithStackIf(err)
+			return true, errors.WithStackIf(err)
+		}
+
+		// check if this server is new
+		if saddRes > 0 {
+			logger.WithField("g_name", g.Name).WithField("guild", g.ID).Info("Joined new guild!")
+			go eventsystem.EmitEvent(eventsystem.NewEventData(nil, eventsystem.EventNewGuild, g), eventsystem.EventNewGuild)
+
+			metricsJoinedGuilds.Inc()
+			commonEventsTotal.With(prometheus.Labels{"type": "Guild Create"}).Inc()
+		}
+
+		// check if the server is banned from using the bot
+		if isBanned {
+			logger.WithField("guild", g.ID).Info("Banned server tried to add bot back")
+			common.BotSession.ChannelMessageSend(g.ID, "This server is banned from using this bot. Join the support server for more info.")
+			err = common.BotSession.GuildLeave(g.ID)
+			if err != nil {
+				return CheckDiscordErrRetry(err), errors.WithStackIf(err)
+			}
+		} else {
+			markGuildKnown(g.ID)
 		}
 	}
 
@@ -344,6 +405,551 @@ func handleDmGuildInfoInteraction(evt *eventsystem.EventData) {
 	}
 }
 
+func RespondDMInteraction(evt *eventsystem.EventData, content string) {
+	ic := evt.InteractionCreate()
+	err := evt.Session.CreateInteractionResponse(ic.ID, ic.Token, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Content: content, Flags: discordgo.MessageFlagsEphemeral},
+	})
+	if err != nil {
+		logger.WithError(err).Error("failed responding to dm interaction")
+	}
+}
+
+// DeferDMInteraction acknowledges the interaction straight away, for handlers
+// that may outlast the time discord allows before one must be answered. The
+// returned reply fills in the response once the work is done.
+func DeferDMInteraction(evt *eventsystem.EventData) (reply func(content string), ok bool) {
+	ic := evt.InteractionCreate()
+	err := evt.Session.CreateInteractionResponse(ic.ID, ic.Token, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
+	})
+	if err != nil {
+		logger.WithError(err).Error("failed deferring dm interaction")
+		return nil, false
+	}
+
+	return func(content string) {
+		_, err := evt.Session.EditOriginalInteractionResponse(common.BotApplication.ID, ic.Token, &discordgo.WebhookParams{Content: content})
+		if err != nil {
+			logger.WithError(err).Error("failed responding to dm interaction")
+		}
+	}, true
+}
+
+// handleDMReportInteraction asks the recipient why they are reporting the dm
+// and whether to delete it. The dm's id rides along in the modal's custom id,
+// since the submit is what does the reporting.
+func handleDMReportInteraction(evt *eventsystem.EventData) {
+	ic := evt.InteractionCreate()
+
+	if confDMReportChannel.GetInt() == 0 {
+		RespondDMInteraction(evt, "Reporting is not configured on this instance.")
+		return
+	}
+
+	customID := ic.MessageComponentData().CustomID
+	guildID, err := strconv.ParseInt(strings.TrimPrefix(customID, DMReportCustomIDPrefix), 10, 64)
+	if err != nil || ic.Message == nil {
+		logger.Errorf("DM report with malformed customID: %s from user %d", customID, ic.User.ID)
+		RespondDMInteraction(evt, "Something went wrong reporting this DM.")
+		return
+	}
+
+	err = evt.Session.CreateInteractionResponse(ic.ID, ic.Token, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseModal,
+		Data: &discordgo.InteractionResponseData{
+			Title:    withBotNameLimit("Report DM to {bot} Staff", modalTextLimit),
+			CustomID: fmt.Sprintf("%s%d_%d", DMReportModalCustomIDPrefix, guildID, ic.Message.ID),
+			Components: []discordgo.TopLevelComponent{
+				discordgo.TextDisplay{
+					Content: withBotName("### This does NOT go to the server's moderators\n" +
+						"Reports go to **{bot} staff**, the team behind the bot. The moderators of the server this DM came from " +
+						"will **not** see it, and {bot} staff cannot act on how a server is run, only on abuse of the bot itself."),
+				},
+				discordgo.Label{
+					Label: withBotNameLimit("What are you reporting to {bot} staff?", modalTextLimit),
+					Component: discordgo.SelectMenu{
+						MenuType:    discordgo.StringSelectMenu,
+						CustomID:    "category",
+						Placeholder: "Pick the closest match",
+						MinValues:   &dmReportCategoriesPerReport,
+						MaxValues:   dmReportCategoriesPerReport,
+						Options:     dmReportCategoryOptions(),
+						Required:    true,
+					},
+				},
+				discordgo.Label{
+					Label:       withBotNameLimit("Details for {bot} staff", modalTextLimit),
+					Description: "At least 20 characters. Server moderators will not see this.",
+					Component: discordgo.TextInput{
+						CustomID:    "reason",
+						Placeholder: withBotName("Describe what happened, so {bot} staff can act on it"),
+						Style:       discordgo.TextInputParagraph,
+						Required:    true,
+						// Long enough that a report carries an actual description.
+						MinLength: 20,
+						MaxLength: 1000,
+					},
+				},
+				discordgo.Label{
+					Label: "Delete this DM after reporting",
+					// The combined report and delete button on older dms shares this id
+					// and always deleted, so it still does unless unticked.
+					Component: discordgo.Checkbox{
+						CustomID: "delete",
+						Default:  true,
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		logger.WithError(err).Error("failed opening dm report modal")
+	}
+}
+
+// handleDMReportModalSubmit forwards the reported dm along with the reason to
+// the configured channel, then deletes it if the recipient asked to.
+func handleDMReportModalSubmit(evt *eventsystem.EventData) {
+	ic := evt.InteractionCreate()
+	data := ic.ModalSubmitData()
+
+	reportChannel := int64(confDMReportChannel.GetInt())
+	if reportChannel == 0 {
+		RespondDMInteraction(evt, "Reporting is not configured on this instance.")
+		return
+	}
+
+	guildID, messageID, err := parseDMReportModalCustomID(data.CustomID)
+	if err != nil {
+		logger.Errorf("DM report modal with malformed customID: %s from user %d", data.CustomID, ic.User.ID)
+		RespondDMInteraction(evt, "Something went wrong reporting this DM.")
+		return
+	}
+
+	// Reporting takes several requests, more than fits in the time discord
+	// allows before an interaction must be answered.
+	reply, ok := DeferDMInteraction(evt)
+	if !ok {
+		return
+	}
+
+	values := dmReportModalValues(data)
+	category, known := dmReportCategoryByValue(values.category)
+	if !known {
+		logger.Errorf("DM report with unknown category %q from user %d", values.category, ic.User.ID)
+		reply("Something went wrong reporting this DM.")
+		return
+	}
+
+	response := category.response
+	if category.value == "scam" && isOwnVerificationDM(evt.Session, ic.ChannelID, messageID) {
+		category.forward = false
+		response = fmt.Sprintf("This is a genuine verification link from {bot}, sent on behalf of the server you joined. "+
+			"It leads to **%s**, {bot}'s own site, where you only need to solve a captcha.", common.ConfHost.GetString())
+	}
+	response = withBotName(response)
+
+	if category.forward {
+		if err := forwardDMReport(evt, reportChannel, guildID, messageID, category, values.reason); err != nil {
+			logger.WithError(err).Error("failed forwarding reported dm")
+			reply("Something went wrong reporting this DM.")
+			return
+		}
+	}
+
+	if !values.deleteDM {
+		if category.forward {
+			disableDMReportButton(evt.Session, ic.ChannelID, messageID)
+		}
+		reply(response)
+		return
+	}
+
+	// Deleted only after forwarding, so a failed delete cannot lose the report.
+	if err := evt.Session.ChannelMessageDelete(ic.ChannelID, messageID); err != nil {
+		logger.WithError(err).Error("failed deleting reported dm")
+		reply(response + "\n\nThe message could not be deleted.")
+		return
+	}
+
+	reply(response + "\n\nThe message has been deleted.")
+}
+
+// forwardDMReport forwards the reported dm to the report channel, followed by
+// the details, which link back to the forward so that reports arriving close
+// together cannot be mixed up.
+func forwardDMReport(evt *eventsystem.EventData, reportChannel, guildID, messageID int64, category dmReportCategory, reason string) error {
+	ic := evt.InteractionCreate()
+
+	server := fmt.Sprintf("`%d` (could not fetch details)", guildID)
+	// The guild is only in state when it is on this node's shards.
+	if gs := State.GetGuild(guildID); gs != nil {
+		server = fmt.Sprintf("**%s** `%d`", gs.Name, guildID)
+	} else if g, err := evt.Session.Guild(guildID); err == nil && g != nil {
+		server = fmt.Sprintf("**%s** `%d`", g.Name, guildID)
+	}
+
+	// Forward the message itself rather than rebuilding it, so the report shows
+	// exactly what was received, attachments and all. The context goes in its
+	// own message since a forward carries no content of its own.
+	forward := &discordgo.MessageSend{
+		Reference: &discordgo.MessageReference{
+			Type:      discordgo.MessageReferenceTypeForward,
+			ChannelID: ic.ChannelID,
+			MessageID: messageID,
+		},
+	}
+
+	forwarded, err := common.BotSession.ChannelMessageSendComplex(reportChannel, forward)
+	if err != nil {
+		return err
+	}
+
+	// A sent message comes back without its guild, which the link needs.
+	if forwarded.GuildID == 0 {
+		forwarded.GuildID = reportChannelGuildID(evt.Session, reportChannel)
+	}
+
+	meta := &discordgo.MessageSend{
+		Content: fmt.Sprintf("[Reported DM](%s) reported by **%s** `%d`, sent from server %s\n**Category:** %s\n**Details:**\n%s",
+			forwarded.Link(), ic.User.String(), ic.User.ID, server, withBotName(category.label), reason),
+		AllowedMentions: discordgo.AllowedMentions{},
+	}
+	if _, err := common.BotSession.ChannelMessageSendComplex(reportChannel, meta); err != nil {
+		logger.WithError(err).Error("failed sending dm report details")
+	}
+
+	return nil
+}
+
+// disableDMReportButton keeps a dm that was reported but kept from being
+// reported again.
+func disableDMReportButton(session *discordgo.Session, channelID, messageID int64) {
+	if err := DisableDMButton(session, channelID, messageID, DMReportCustomIDPrefix, "Message Reported"); err != nil {
+		logger.WithError(err).Error("failed disabling report button on reported dm")
+	}
+}
+
+// DisableDMButton disables and relabels the buttons in a dm whose custom id
+// starts with the prefix.
+func DisableDMButton(session *discordgo.Session, channelID, messageID int64, customIDPrefix, label string) error {
+	msg, err := session.ChannelMessage(channelID, messageID)
+	if err != nil {
+		return err
+	}
+
+	for _, component := range msg.Components {
+		row, ok := component.(*discordgo.ActionsRow)
+		if !ok {
+			continue
+		}
+
+		for _, c := range row.Components {
+			if button, ok := c.(*discordgo.Button); ok && strings.HasPrefix(button.CustomID, customIDPrefix) {
+				button.Label = label
+				button.Disabled = true
+			}
+		}
+	}
+
+	_, err = session.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		ID:         messageID,
+		Channel:    channelID,
+		Components: msg.Components,
+		// Flags are always sent on an edit, these are the only ones it may carry.
+		Flags: msg.Flags & (discordgo.MessageFlagsSuppressEmbeds | discordgo.MessageFlagsIsComponentsV2),
+	})
+	return err
+}
+
+var (
+	reportChannelGuildMu  sync.Mutex
+	reportChannelGuildIDs = make(map[int64]int64)
+)
+
+// reportChannelGuildID looks up the guild of the report channel once, as the
+// channel is fixed by config and so never moves.
+func reportChannelGuildID(session *discordgo.Session, channelID int64) int64 {
+	reportChannelGuildMu.Lock()
+	defer reportChannelGuildMu.Unlock()
+
+	if guildID, ok := reportChannelGuildIDs[channelID]; ok {
+		return guildID
+	}
+
+	channel, err := session.Channel(channelID)
+	if err != nil {
+		logger.WithError(err).Error("failed fetching dm report channel")
+		return 0
+	}
+
+	reportChannelGuildIDs[channelID] = channel.GuildID
+	return channel.GuildID
+}
+
+func parseDMReportModalCustomID(customID string) (guildID, messageID int64, err error) {
+	guildPart, messagePart, ok := strings.Cut(strings.TrimPrefix(customID, DMReportModalCustomIDPrefix), "_")
+	if !ok {
+		return 0, 0, errors.New("missing message id")
+	}
+
+	guildID, err = strconv.ParseInt(guildPart, 10, 64)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	messageID, err = strconv.ParseInt(messagePart, 10, 64)
+	return guildID, messageID, err
+}
+
+type dmReportValues struct {
+	category string
+	reason   string
+	deleteDM bool
+}
+
+func dmReportModalValues(data discordgo.ModalSubmitInteractionData) (values dmReportValues) {
+	for _, component := range data.Components {
+		label, ok := component.(*discordgo.Label)
+		if !ok {
+			continue
+		}
+
+		switch input := label.Component.(type) {
+		case *discordgo.SelectMenu:
+			if input.CustomID == "category" && len(input.Values) > 0 {
+				values.category = input.Values[0]
+			}
+		case *discordgo.TextInput:
+			if input.CustomID == "reason" {
+				values.reason = input.Value
+			}
+		case *discordgo.Checkbox:
+			if input.CustomID == "delete" {
+				values.deleteDM = input.Value
+			}
+		}
+	}
+
+	return values
+}
+
+// dmReportCategory is what a recipient picks when reporting a dm. Only abuse
+// of the bot itself is forwarded to staff, the rest is up to the server and
+// the recipient is told so instead.
+type dmReportCategory struct {
+	value       string
+	label       string
+	description string
+	forward     bool
+	response    string
+}
+
+const dmReportForwardedResponse = "Reported to {bot} staff. Thank you."
+
+// Ordered with the categories that are not forwarded first, as those are what
+// most reports are about.
+var dmReportCategories = []dmReportCategory{
+	{
+		value:       "hacked",
+		label:       "My account was hacked",
+		description: "You were punished for something sent from your account while it was hacked",
+		response: "{bot} staff cannot undo punishments, but you should secure your account first:\n" +
+			"1. Change your Discord password and turn on two-factor authentication.\n" +
+			"2. In **User Settings > Devices**, log out of all known devices.\n" +
+			"3. In **User Settings > Authorized Apps**, remove any app you do not recognise.\n" +
+			"4. Scan your computer for malware, accounts are usually taken over by programs that steal your login.\n\n" +
+			"Once your account is secure, contact the server's staff to appeal.",
+	},
+	{
+		value:       "punishment",
+		label:       "I was warned, muted, timed out, kicked or banned",
+		description: "You disagree with it, want to appeal, or did nothing wrong",
+		response:    "{bot} staff cannot review or undo moderation actions, those are decided by the server's own moderators. Contact the server's staff to appeal.",
+	},
+	{
+		value:       "broken",
+		label:       "Something isn't working",
+		description: "A role menu, command or other feature gave an error or did nothing",
+		response: "Features like role menus and commands are set up by each server, and {bot} staff cannot fix a server's setup. " +
+			"Let the server's staff know what went wrong, as they can see and change how it is configured.",
+	},
+	{
+		value:       "mod_abuse",
+		label:       "A moderator is abusing their powers",
+		description: "A server's staff are treating members unfairly",
+		response:    "{bot} staff do not moderate servers and cannot act on how one is run. Raise it with the server's owner, or leave the server if you prefer.",
+	},
+	{
+		value:       "unwanted",
+		label:       "I don't want these DMs",
+		description: "The DMs are not abusive, you just don't want them",
+		response:    "These DMs are set up by the server, not by {bot} staff. Ask the server's staff to stop them, leave the server, or use **Delete** to remove them.",
+	},
+	{
+		value:       "scam",
+		label:       "Scam or phishing",
+		description: "Malicious links, asks for your login or payment, or pretends to be Discord staff",
+		forward:     true,
+		response:    dmReportForwardedResponse,
+	},
+	{
+		value:    "harassment",
+		label:    "Harassment, threats or hate speech",
+		forward:  true,
+		response: dmReportForwardedResponse,
+	},
+	{
+		value:    "nsfw_illegal",
+		label:    "Sexual or illegal content",
+		forward:  true,
+		response: dmReportForwardedResponse,
+	},
+}
+
+// A select menu needs its bounds by pointer, and a report has one category.
+var dmReportCategoriesPerReport = 1
+
+// isOwnVerificationDM reports whether every link in the dm leads to this
+// instance's verification page. Servers write their own verification message,
+// so the links are checked rather than trusting where the dm came from.
+func isOwnVerificationDM(session *discordgo.Session, channelID, messageID int64) bool {
+	msg, err := session.ChannelMessage(channelID, messageID)
+	if err != nil {
+		logger.WithError(err).Error("failed fetching reported dm")
+		return false
+	}
+
+	genuine, err := onlyVerificationLinks(msg)
+	if err != nil {
+		logger.WithError(err).Error("failed reading links in reported dm")
+	}
+
+	return genuine
+}
+
+func onlyVerificationLinks(msg *discordgo.Message) (bool, error) {
+	links, err := dmMessageLinks(msg)
+	if err != nil || len(links) == 0 {
+		return false, err
+	}
+
+	for _, link := range links {
+		if !isVerificationLink(link) {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+var (
+	linkRegex             = regexp.MustCompile(`https?://[^\s<>()\[\]"'\\]+`)
+	verificationPathRegex = regexp.MustCompile(`^/(v/[A-Za-z]+|public/\d+/verify/\d+/[A-Za-z]+)/?$`)
+)
+
+func isVerificationLink(link string) bool {
+	parsed, err := url.Parse(link)
+	if err != nil {
+		return false
+	}
+
+	return strings.EqualFold(parsed.Host, common.ConfHost.GetString()) && verificationPathRegex.MatchString(parsed.Path)
+}
+
+// dmMessageLinks finds the links anywhere in the message. The message is
+// searched as json so no field can be missed, as a missed link would make a
+// scam pass as genuine. Links that are not really in it, like attachment urls,
+// only lead to the report being forwarded.
+func dmMessageLinks(msg *discordgo.Message) ([]string, error) {
+	encodedMessage, err := json.Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	// A message leaves its components out of its own json.
+	encodedComponents, err := json.Marshal(msg.Components)
+	if err != nil {
+		return nil, err
+	}
+
+	links := linkRegex.FindAllString(string(encodedMessage), -1)
+	links = append(links, linkRegex.FindAllString(string(encodedComponents), -1)...)
+	return links, nil
+}
+
+// Discord's limit on modal titles and component labels.
+const modalTextLimit = 45
+
+// withBotName fills in the bot's name for {bot}, so an instance shows its own
+// name rather than YAGPDB's.
+func withBotName(text string) string {
+	name := "the bot"
+	if common.BotUser != nil && common.BotUser.Username != "" {
+		name = common.BotUser.Username
+	}
+
+	return strings.ReplaceAll(text, "{bot}", name)
+}
+
+// withBotNameLimit is withBotName for text with a length limit, where a long
+// name is swapped for a generic one rather than the text being cut off.
+func withBotNameLimit(text string, limit int) string {
+	if named := withBotName(text); utf8.RuneCountInString(named) <= limit {
+		return named
+	}
+
+	return strings.ReplaceAll(text, "{bot}", "Bot")
+}
+
+func dmReportCategoryOptions() []discordgo.SelectMenuOption {
+	options := make([]discordgo.SelectMenuOption, 0, len(dmReportCategories))
+	for _, category := range dmReportCategories {
+		options = append(options, discordgo.SelectMenuOption{
+			Value:       category.value,
+			Label:       withBotName(category.label),
+			Description: withBotName(category.description),
+		})
+	}
+
+	return options
+}
+
+func dmReportCategoryByValue(value string) (dmReportCategory, bool) {
+	for _, category := range dmReportCategories {
+		if category.value == value {
+			return category, true
+		}
+	}
+
+	return dmReportCategory{}, false
+}
+
+func handleDMDeleteInteraction(evt *eventsystem.EventData) {
+	ic := evt.InteractionCreate()
+
+	if ic.Message == nil {
+		RespondDMInteraction(evt, "Something went wrong deleting this DM.")
+		return
+	}
+
+	reply, ok := DeferDMInteraction(evt)
+	if !ok {
+		return
+	}
+
+	if err := evt.Session.ChannelMessageDelete(ic.ChannelID, ic.Message.ID); err != nil {
+		logger.WithError(err).Error("failed deleting dm")
+		reply("The message could not be deleted.")
+		return
+	}
+
+	reply("Deleted.")
+}
+
 func HandleInteractionCreate(evt *eventsystem.EventData) {
 	ic := evt.InteractionCreate()
 	if ic.GuildID != 0 {
@@ -355,15 +961,69 @@ func HandleInteractionCreate(evt *eventsystem.EventData) {
 	if ic.User.ID == common.BotUser.ID {
 		return
 	}
-	//handle dm message guild info interaction
+	if handler, ok := registeredDMInteractionHandler(ic); ok {
+		handler(evt)
+		return
+	}
 
-	if ic.Type == discordgo.InteractionMessageComponent && strings.HasPrefix(ic.MessageComponentData().CustomID, "DM_") {
-		handleDmGuildInfoInteraction(evt)
-	} else {
-		err := pubsub.Publish("dm_interaction", -1, ic)
-		if err != nil {
-			logger.WithError(err).Error("failed publishing dm interaction")
+	if ic.Type == discordgo.InteractionModalSubmit &&
+		strings.HasPrefix(ic.ModalSubmitData().CustomID, DMReportModalCustomIDPrefix) {
+		handleDMReportModalSubmit(evt)
+	} else if ic.Type == discordgo.InteractionMessageComponent {
+		// The server info prefix is a prefix of the others, so it goes last.
+		switch customID := ic.MessageComponentData().CustomID; {
+		case strings.HasPrefix(customID, DMReportCustomIDPrefix):
+			handleDMReportInteraction(evt)
+		case strings.HasPrefix(customID, DMDeleteCustomIDPrefix):
+			handleDMDeleteInteraction(evt)
+		case strings.HasPrefix(customID, DMServerInfoCustomIDPrefix):
+			handleDmGuildInfoInteraction(evt)
+		default:
+			publishDMInteraction(ic)
 		}
+	} else {
+		publishDMInteraction(ic)
+	}
+}
+
+type dmInteractionHandler struct {
+	customIDPrefix string
+	handle         func(evt *eventsystem.EventData)
+}
+
+var dmInteractionHandlers []dmInteractionHandler
+
+// RegisterDMInteractionHandler claims dm buttons and modals whose custom id
+// starts with the prefix, so they are handled once on the node that receives
+// them rather than broadcast to every node. Call it from BotInit.
+func RegisterDMInteractionHandler(customIDPrefix string, handle func(evt *eventsystem.EventData)) {
+	dmInteractionHandlers = append(dmInteractionHandlers, dmInteractionHandler{customIDPrefix: customIDPrefix, handle: handle})
+}
+
+func registeredDMInteractionHandler(ic *discordgo.InteractionCreate) (func(evt *eventsystem.EventData), bool) {
+	var customID string
+	switch ic.Type {
+	case discordgo.InteractionMessageComponent:
+		customID = ic.MessageComponentData().CustomID
+	case discordgo.InteractionModalSubmit:
+		customID = ic.ModalSubmitData().CustomID
+	default:
+		return nil, false
+	}
+
+	for _, handler := range dmInteractionHandlers {
+		if strings.HasPrefix(customID, handler.customIDPrefix) {
+			return handler.handle, true
+		}
+	}
+
+	return nil, false
+}
+
+func publishDMInteraction(ic *discordgo.InteractionCreate) {
+	err := pubsub.Publish("dm_interaction", -1, ic)
+	if err != nil {
+		logger.WithError(err).Error("failed publishing dm interaction")
 	}
 }
 

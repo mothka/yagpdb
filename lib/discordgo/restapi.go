@@ -19,7 +19,8 @@ import (
 	_ "image/jpeg" // For JPEG decoding
 	_ "image/png"  // For PNG decoding
 	"io"
-	"io/ioutil"
+	"slices"
+
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -43,15 +44,26 @@ var (
 	ErrGuildNoSplash           = errors.New("guild does not have a splash set")
 	ErrUnauthorized            = errors.New("HTTP request was unauthorized. This could be because the provided token was not a bot token. Please add \"Bot \" to the start of your token. https://discordapp.com/developers/docs/reference#authentication-example-bot-token-authorization-header")
 	ErrTokenInvalid            = errors.New("Invalid token provided, it has been marked as invalid")
+	ErrInteractionExpired      = errors.New("interaction is too old to respond to")
 )
 
+// Discord only accepts the initial response to an interaction within 3 seconds, the extra margin covers
+// clock drift between this host and discord. Responding later can only fail and counts as an invalid request.
+const InteractionResponseDeadline = 5 * time.Second
+
+const discordEpochMillis = 1420070400000
+
+func interactionAge(interactionID int64) time.Duration {
+	return time.Since(time.UnixMilli((interactionID >> 22) + discordEpochMillis))
+}
+
 // Request is the same as RequestWithBucketID but the bucket id is the same as the urlStr
-func (s *Session) Request(method, urlStr string, data interface{}, headers map[string]string) (response []byte, err error) {
+func (s *Session) Request(method, urlStr string, data any, headers map[string]string) (response []byte, err error) {
 	return s.RequestWithBucketID(method, urlStr, data, headers, strings.SplitN(urlStr, "?", 2)[0])
 }
 
 // RequestWithBucketID makes a (GET/POST/...) Requests to Discord REST API with JSON data.
-func (s *Session) RequestWithBucketID(method, urlStr string, data interface{}, headers map[string]string, bucketID string) (response []byte, err error) {
+func (s *Session) RequestWithBucketID(method, urlStr string, data any, headers map[string]string, bucketID string) (response []byte, err error) {
 	var body []byte
 	if data != nil {
 		body, err = json.Marshal(data)
@@ -133,7 +145,7 @@ func (s *Session) doRequest(method, urlStr, contentType string, b []byte, header
 		}
 	}()
 
-	response, err = ioutil.ReadAll(resp.Body)
+	response, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, true, false, err
 	}
@@ -162,7 +174,8 @@ func (s *Session) doRequest(method, urlStr, contentType string, b []byte, header
 		rl := TooManyRequests{}
 		err = json.Unmarshal(response, &rl)
 		if err != nil {
-			s.log(LogError, "request body rate limit unmarshal error, %s, %q, url: %s", err, string(response), urlStr)
+			// discord always sends a json body with its 429s, so this is cloudflare blocking every request from this IP
+			s.log(LogError, "429 without a discord ratelimit body, cloudflare is most likely blocking this IP, retry after: %qs, body: %q, url: %s", resp.Header.Get("Retry-After"), string(response), urlStr)
 			// get ratelimit from headers in case body doesn't have it.
 			retryAfter := resp.Header.Get("Retry-After")
 			if retryAfter != "" {
@@ -268,7 +281,7 @@ func (s *Session) innerDoRequest(method, urlStr, contentType string, b []byte, h
 	return req, resp, err
 }
 
-func unmarshal(data []byte, v interface{}) error {
+func unmarshal(data []byte, v any) error {
 	err := json.Unmarshal(data, v)
 	return err
 }
@@ -539,11 +552,8 @@ func MemberPermissions(guild *Guild, channel *Channel, member *Member) (apermiss
 	}
 
 	for _, role := range guild.Roles {
-		for _, roleID := range member.Roles {
-			if role.ID == roleID {
-				apermissions |= role.Permissions
-				break
-			}
+		if slices.Contains(member.Roles, role.ID) {
+			apermissions |= role.Permissions
 		}
 	}
 
@@ -746,7 +756,7 @@ func (s *Session) GuildBanCreateWithReason(guildID, userID int64, reason string,
 
 	uri := EndpointGuildBan(guildID, userID)
 
-	data := make(map[string]interface{})
+	data := make(map[string]any)
 	if days > 0 {
 		data["delete_message_days"] = days
 	}
@@ -1094,7 +1104,7 @@ func (s *Session) GuildChannelCreateWithOverwrites(guildID int64, name string, c
 	data := struct {
 		Name                 string                 `json:"name"`
 		Type                 ChannelType            `json:"type"`
-		ParentID             int64                  `json:"parent_id,string"`
+		ParentID             int64                  `json:"parent_id,string,omitempty"`
 		PermissionOverwrites []*PermissionOverwrite `json:"permission_overwrites"`
 	}{name, ctype, parentID, overwrites}
 
@@ -1150,6 +1160,34 @@ func (s *Session) GuildRoles(guildID int64) (st []*Role, err error) {
 	err = unmarshal(body, &st)
 
 	return // TODO return pointer
+}
+
+// GuildRoleMemberCounts returns the number of members with each role, keyed by role id.
+// The everyone role is not included.
+// guildID: The ID of a Guild.
+func (s *Session) GuildRoleMemberCounts(guildID int64) (counts map[int64]int, err error) {
+	body, err := s.RequestWithBucketID("GET", EndpointGuildRoleMemberCounts(guildID), nil, nil, EndpointGuildRoleMemberCounts(guildID))
+	if err != nil {
+		return
+	}
+
+	var raw map[string]int
+	err = unmarshal(body, &raw)
+	if err != nil {
+		return
+	}
+
+	counts = make(map[int64]int, len(raw))
+	for k, v := range raw {
+		id, err := strconv.ParseInt(k, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+
+		counts[id] = v
+	}
+
+	return
 }
 
 // GuildRoleCreate returns a new Guild Role.
@@ -1903,6 +1941,21 @@ func (s *Session) doChannelMessagesBulkDelete(channelID int64, messages []int64,
 func (s *Session) ChannelMessagePin(channelID, messageID int64) (err error) {
 
 	_, err = s.RequestWithBucketID("PUT", EndpointChannelMessagePin(channelID, messageID), nil, nil, EndpointChannelMessagePin(channelID, 0))
+	return
+}
+
+// ChannelVoiceStatusSet sets the status of a voice channel, an empty status clears it.
+// channelID: The ID of a voice channel.
+// status: The new status, up to 500 characters.
+func (s *Session) ChannelVoiceStatusSet(channelID int64, status string) (err error) {
+	data := struct {
+		Status *string `json:"status"`
+	}{}
+	if status != "" {
+		data.Status = &status
+	}
+
+	_, err = s.RequestWithBucketID("PUT", EndpointChannelVoiceStatus(channelID), data, nil, EndpointChannelVoiceStatus(channelID))
 	return
 }
 
@@ -3171,12 +3224,30 @@ func (s *Session) BatchEditGuildApplicationCommandsPermissions(applicationID int
 // CreateInteractionResponse Create a response to an Interaction from the gateway. Takes an Interaction response.
 // POST /interactions/{interaction.id}/{interaction.token}/callback
 func (s *Session) CreateInteractionResponse(interactionID int64, token string, data *InteractionResponse) (err error) {
+	if interactionAge(interactionID) > InteractionResponseDeadline {
+		return ErrInteractionExpired
+	}
+
 	if data.Data != nil && len(data.Data.Embeds) > 0 {
 		data.Data.Embeds = ValidateComplexMessageEmbeds(data.Data.Embeds)
 	}
 
-	if data.Data != nil && len(data.Data.Files) > 0 {
-		contentType, body, err := MultipartBodyWithJSON(data, data.Data.Files)
+	// TODO: Remove this when compatibility is not required.
+	var files []*File
+	if data.Data != nil {
+		files = data.Data.Files
+		if data.Data.File != nil {
+			if files == nil {
+				files = []*File{data.Data.File}
+			} else {
+				err = fmt.Errorf("cannot specify both File and Files")
+				return
+			}
+		}
+	}
+
+	if len(files) > 0 {
+		contentType, body, err := MultipartBodyWithJSON(data, files)
 		if err != nil {
 			return err
 		}

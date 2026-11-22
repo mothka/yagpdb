@@ -2,6 +2,7 @@
 {{template "cp_head" .}}
 <header class="page-header">
     <h2>Advanced Automoderator</h2>
+    {{template "cp_docs_link" "moderation/advanced-automoderator/overview"}}
 </header>
 
 {{template "cp_alerts" .}}
@@ -146,7 +147,8 @@ table{
                             <p>Advanced Automoderator (also known as Automoderator V2 or AMV2 ) is a completely new automoderator system made with the goal to be the most flexible, configurable system you could get for a chat bot (within reason).<br>
                                 You start by creating a ruleset, then creating rules inside said ruleset.<br>
                                 Rules consist of one or more triggers, conditions, and effects, you can also apply general conditions on the ruleset itself.<br>
-                                Visit the <a href="https://help.yagpdb.xyz/docs/moderation/advanced-automoderator" target="_blank">documentation</a> for more information on how to build rules and some examples.</p>
+                                Visit the <a href="https://help.yagpdb.xyz/docs/moderation/advanced-automoderator" target="_blank">documentation</a> for more information on how to build rules and some examples.<br>
+                                Just want the common protections switched on? The <a href="/manage/{{.ActiveGuild.ID}}/automod_legacy" data-partial-load="true">Basic Automoderator</a> does that with a few toggles.</p>
                             <p>If you have some suggestions for triggers, conditions,  or join the <a href="https://discord.gg/4udtcA5" target="_blank">support server</a> and add a suggestion.</p>
                         </div>
                     </div>
@@ -532,16 +534,15 @@ $(function(){
             column.append(input)
             break;
         case "bool":
-            // <div class="form-check">
-            //             <input type="checkbox" class="form-check-input" name="$name" checked>
-            //         </div>
-            var input = $("<input type='checkbox' class='form-check-input' name='"+key+"'>")
+            // Rule parts get renumbered when one is removed, so the id can't be based on the field name.
+            var boolID = "am-new-" + Date.now() + "-" + Math.floor(Math.random() * 1e6)
+            var input = $("<input type='checkbox' class='tgl tgl-flat tgl-sm' name='"+key+"'>").attr("id", boolID)
             if(opt.Default){
                 input.attr("checked", true)
             }
 
-            var container = $("<div class='form-check'>")
-            container.append(input)
+            var container = $("<div class='d-flex align-items-center'>")
+            container.append(input, $("<label class='tgl-btn mb-0'>").attr("for", boolID))
             column.append(container)
             break;
         case "multi_role":
@@ -562,6 +563,10 @@ $(function(){
         case "list":
             cloneDropdown(column, "#automod-list-selection-template", key, true);
             break;
+        }
+
+        if(opt.Help){
+            column.append($("<p class='help-block mb-0'>").text(opt.Help))
         }
 
         cell.append(wrapper);
@@ -651,10 +656,12 @@ $(function(){
                         {{end}}
                     </select>
                     {{else if eq .Kind "bool"}}
-                    <div class="form-check">
-                        <input type="checkbox" class="form-check-input" name="{{$name}}" {{if  (index $dot.settings .Key)}}checked{{end}}>
+                    <div class="d-flex align-items-center">
+                        <input type="checkbox" class="tgl tgl-flat tgl-sm" id="am-part-{{$dot.part.ID}}-{{.Key}}" name="{{$name}}" {{if  (index $dot.settings .Key)}}checked{{end}}>
+                        <label for="am-part-{{$dot.part.ID}}-{{.Key}}" class="tgl-btn mb-0"></label>
                     </div>
                     {{end}}
+                    {{if .Help}}<p class="help-block mb-0">{{.Help}}</p>{{end}}
                 </div>
             </div>
         </div>

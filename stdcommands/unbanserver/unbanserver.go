@@ -14,12 +14,11 @@ var Command = &commands.YAGCommand{
 	HideFromCommandsPage: true,
 	Name:                 "unbanserver",
 	Description:          "Removes the bot ban from the specified server. Bot Owner Only",
-	HideFromHelp:         true,
 	RequiredArgs:         1,
 	Arguments: []*dcmd.ArgDef{
 		{Name: "server", Type: dcmd.String},
 	},
-	RunFunc: util.RequireOwner(func(data *dcmd.Data) (interface{}, error) {
+	RunFunc: util.RequireOwner(func(data *dcmd.Data) (any, error) {
 
 		var unbanned bool
 		err := common.RedisPool.Do(radix.Cmd(&unbanned, "SREM", "banned_servers", data.Args[0].Str()))

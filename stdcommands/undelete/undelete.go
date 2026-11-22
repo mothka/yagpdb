@@ -2,6 +2,7 @@ package undelete
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/botlabs-gg/yagpdb/v2/bot"
 	"github.com/botlabs-gg/yagpdb/v2/commands"
@@ -11,19 +12,21 @@ import (
 )
 
 var Command = &commands.YAGCommand{
-	CmdCategory:     commands.CategoryTool,
-	Name:            "Undelete",
-	Aliases:         []string{"ud", "snipe"},
-	Description:     "Views the recent deleted messages. By default, only the current user's deleted messages will show.",
-	LongDescription: "You can use the `-a` flag to view all users delete messages, or `-u` to view a specified user's deleted messages.\nBoth `-a` and `-u` require Manage Messages permission.\nNote: `-u` overrides `-a` meaning even though `-a` might've been specified along with `-u` only messages from the user provided using `-u` will be shown.",
-	RequiredArgs:    0,
+	CmdCategory:         commands.CategoryTool,
+	Name:                "Undelete",
+	Aliases:             []string{"ud", "snipe"},
+	Description:         "Views the recent deleted messages. By default, only the current user's deleted messages will show.",
+	LongDescription:     "You can use the `-a` flag to view all users delete messages, or `-u` to view a specified user's deleted messages.\nBoth `-a` and `-u` require Manage Messages permission.\nNote: `-u` overrides `-a` meaning even though `-a` might've been specified along with `-u` only messages from the user provided using `-u` will be shown.",
+	RequiredArgs:        0,
+	SlashCommandEnabled: true,
+	DefaultEnabled:      true,
 	ArgSwitches: []*dcmd.ArgDef{
 		{Name: "a", Help: "from all users"},
 		{Name: "u", Help: "from a specific user", Type: dcmd.UserID, Default: 0},
 		{Name: "count", Help: "Number of messages to show, Min: 1, Max 10", Type: dcmd.Int, Default: 10},
 		{Name: "channel", Help: "Optional target channel", Type: dcmd.Channel},
 	},
-	RunFunc: func(data *dcmd.Data) (interface{}, error) {
+	RunFunc: func(data *dcmd.Data) (any, error) {
 		allUsers := data.Switch("a").Value != nil && data.Switch("a").Value.(bool)
 		targetUser := data.Switch("u").Int64()
 
@@ -57,7 +60,8 @@ var Command = &commands.YAGCommand{
 			count = 1
 		}
 
-		resp := fmt.Sprintf("Last %d deleted message(s) (last hour or 12 hours for premium): \n\n", count)
+		var resp strings.Builder
+		resp.WriteString(fmt.Sprintf("Last %d deleted message(s) (last hour or 12 hours for premium): \n\n", count))
 		numFound := 0
 
 		messages := bot.State.GetMessages(data.GuildData.GS.ID, channel.ID, &dstate.MessagesQuery{Limit: 100, IncludeDeleted: true})
@@ -77,7 +81,7 @@ var Command = &commands.YAGCommand{
 			parsedTime := fmt.Sprintf("<t:%s:f>", fmt.Sprint(msg.ParsedCreatedAt.UTC().Unix()))
 			relativeTime := fmt.Sprintf("<t:%s:R>", fmt.Sprint(msg.ParsedCreatedAt.UTC().Unix()))
 
-			resp += fmt.Sprintf("%s (%s) **%s** (ID %d): %s\n\n", parsedTime, relativeTime, msg.Author.String(), msg.Author.ID, msg.ContentWithMentionsReplaced())
+			resp.WriteString(fmt.Sprintf("%s (%s) **%s** (ID %d): %s\n\n", parsedTime, relativeTime, msg.Author.String(), msg.Author.ID, msg.ContentWithMentionsReplaced()))
 			numFound++
 			if numFound == count {
 				break
@@ -85,9 +89,9 @@ var Command = &commands.YAGCommand{
 		}
 
 		if numFound == 0 {
-			resp += "none..."
+			resp.WriteString("none...")
 		}
 
-		return resp, nil
+		return resp.String(), nil
 	},
 }

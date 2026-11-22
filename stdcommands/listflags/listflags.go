@@ -15,12 +15,11 @@ var Command = &commands.YAGCommand{
 	HideFromCommandsPage: true,
 	Name:                 "listflags",
 	Description:          "Lists feature flags for the current, or optional provided guild. Bot Owner Only",
-	HideFromHelp:         true,
 	RequiredArgs:         0,
 	Arguments: []*dcmd.ArgDef{
 		{Name: "server", Type: dcmd.BigInt},
 	},
-	RunFunc: util.RequireOwner(func(data *dcmd.Data) (interface{}, error) {
+	RunFunc: util.RequireOwner(func(data *dcmd.Data) (any, error) {
 		target := data.GuildData.GS.ID
 		if data.Args[0].Int64() != 0 {
 			target = data.Args[0].Int64()

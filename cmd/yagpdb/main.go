@@ -29,6 +29,7 @@ import (
 	"github.com/botlabs-gg/yagpdb/v2/customcommands"
 	"github.com/botlabs-gg/yagpdb/v2/discordlogger"
 	"github.com/botlabs-gg/yagpdb/v2/logs"
+	"github.com/botlabs-gg/yagpdb/v2/messagecreator"
 	"github.com/botlabs-gg/yagpdb/v2/moderation"
 	"github.com/botlabs-gg/yagpdb/v2/naturaltime"
 	"github.com/botlabs-gg/yagpdb/v2/notifications"
@@ -36,6 +37,7 @@ import (
 	"github.com/botlabs-gg/yagpdb/v2/premium"
 	"github.com/botlabs-gg/yagpdb/v2/premium/discordpremiumsource"
 	"github.com/botlabs-gg/yagpdb/v2/premium/patreonpremiumsource"
+	"github.com/botlabs-gg/yagpdb/v2/quicksetup"
 	"github.com/botlabs-gg/yagpdb/v2/reddit"
 	"github.com/botlabs-gg/yagpdb/v2/reminders"
 	"github.com/botlabs-gg/yagpdb/v2/reputation"
@@ -43,13 +45,13 @@ import (
 	"github.com/botlabs-gg/yagpdb/v2/rss"
 	"github.com/botlabs-gg/yagpdb/v2/rsvp"
 	"github.com/botlabs-gg/yagpdb/v2/safebrowsing"
+	"github.com/botlabs-gg/yagpdb/v2/serverpreview"
 	"github.com/botlabs-gg/yagpdb/v2/serverstats"
 	"github.com/botlabs-gg/yagpdb/v2/soundboard"
 	"github.com/botlabs-gg/yagpdb/v2/stdcommands"
 	"github.com/botlabs-gg/yagpdb/v2/streaming"
 	"github.com/botlabs-gg/yagpdb/v2/tickets"
 	"github.com/botlabs-gg/yagpdb/v2/timezonecompanion"
-	"github.com/botlabs-gg/yagpdb/v2/twitter"
 	"github.com/botlabs-gg/yagpdb/v2/verification"
 	"github.com/botlabs-gg/yagpdb/v2/youtube"
 	// External plugins
@@ -71,6 +73,7 @@ func main() {
 	commands.RegisterPlugin()
 	stdcommands.RegisterPlugin()
 	serverstats.RegisterPlugin()
+	serverpreview.RegisterPlugin()
 	notifications.RegisterPlugin()
 	customcommands.RegisterPlugin()
 	reddit.RegisterPlugin()
@@ -87,12 +90,13 @@ func main() {
 	rolecommands.RegisterPlugin()
 	cah.RegisterPlugin()
 	tickets.RegisterPlugin()
+	messagecreator.RegisterPlugin()
 	verification.RegisterPlugin()
 	premium.RegisterPlugin()
+	quicksetup.RegisterPlugin()
 	patreonpremiumsource.RegisterPlugin()
 	discordpremiumsource.RegisterPlugin()
 	scheduledevents2.RegisterPlugin()
-	twitter.RegisterPlugin()
 	rsvp.RegisterPlugin()
 	timezonecompanion.RegisterPlugin()
 	admin.RegisterPlugin()

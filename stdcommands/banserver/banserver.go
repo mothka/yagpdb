@@ -14,12 +14,11 @@ var Command = &commands.YAGCommand{
 	HideFromCommandsPage: true,
 	Name:                 "banserver",
 	Description:          "Bans the specified server from using the bot. YAGPDB will leave the server, and leave whenever invited back. Bot Owner Only",
-	HideFromHelp:         true,
 	RequiredArgs:         1,
 	Arguments: []*dcmd.ArgDef{
 		{Name: "server", Type: dcmd.BigInt},
 	},
-	RunFunc: util.RequireOwner(func(data *dcmd.Data) (interface{}, error) {
+	RunFunc: util.RequireOwner(func(data *dcmd.Data) (any, error) {
 		err := common.BotSession.GuildLeave(data.Args[0].Int64())
 		if err == nil {
 

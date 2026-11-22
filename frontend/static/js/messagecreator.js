@@ -1,0 +1,1191 @@
+// NOTE: the control panel loads pages via partial AJAX navigation ($("#main-content").html(...)),
+// so DOMContentLoaded does NOT fire on navigation. We initialise immediately and scope every
+// listener to #mc-root. Toggles are driven by explicit label clicks (Bootstrap's
+// data-toggle="buttons" fires a jQuery-only change event native listeners never receive).
+(function () {
+    "use strict";
+
+    let preview = window.YAGDiscordPreview;
+    let renderComponents = preview.renderComponents;
+    let renderText = preview.renderText;
+    let renderMarkdown = preview.renderMarkdown;
+    let renderInlineMarkdown = preview.renderInlineMarkdown;
+    let emojiNode = preview.emojiNode;
+
+    let NODE_TITLES = { 1: "Action Row", 9: "Section", 10: "Text", 12: "Media Gallery", 14: "Separator", 17: "Container" };
+
+    let TEMPLATE_PREFIX = "templates-";
+    let MAX_CUSTOM_ID = 100;                                 // Discord limit, including the prefix
+    let MAX_SUFFIX = MAX_CUSTOM_ID - TEMPLATE_PREFIX.length; // editable part the user types
+    let PRESET_COLORS = ["#5865f2", "#57f287", "#fee75c", "#eb459e", "#ed4245", "#1abc9c",
+        "#3498db", "#9b59b6", "#e67e22", "#f1c40f", "#95a5a6", "#ffffff", "#2c2f33", "#000000"];
+
+    let currentMode = "normal";
+    let currentAction = "create";
+    let loadedForEdit = false;
+    let state = { embeds: [], components: [] };
+    let els = {};
+
+    function init() {
+        let root = document.getElementById("mc-root");
+        if (!root) return;
+
+        els.root = root;
+        els.guildID = root.getAttribute("data-guildid");
+        els.form = document.getElementById("mc-form");
+        els.normalFields = document.getElementById("normal-fields");
+        els.componentsLabel = document.getElementById("components-label");
+        els.builder = document.getElementById("components-builder");
+        els.addBar = document.getElementById("components-add-bar");
+        els.modeHint = document.getElementById("mc-mode-hint");
+        els.errors = document.getElementById("mc-errors");
+        els.preview = document.getElementById("mc-preview");
+        els.compError = document.getElementById("components-error");
+        els.embedsBuilder = document.getElementById("embeds-builder");
+        els.embedsAddBar = document.getElementById("embeds-add-bar");
+        els.submit = document.getElementById("mc-submit");
+        els.submitLabel = document.getElementById("mc-submit-label");
+        els.submitIcon = document.getElementById("mc-submit-icon");
+        els.editHint = document.getElementById("mc-edit-hint");
+        els.typeLockNote = document.getElementById("mc-type-lock-note");
+        els.code = document.getElementById("mc-code");
+        els.codeCopy = document.getElementById("mc-code-copy");
+        els.codeView = document.getElementById("mc-code-view");
+        if (els.codeCopy) els.codeCopy.addEventListener("click", copyCode);
+        root.querySelectorAll(".mc-pane-tabs label").forEach(function (label) {
+            label.addEventListener("click", function (e) {
+                e.preventDefault();
+                let input = label.querySelector("input");
+                if (input) setPane(input.value);
+            });
+        });
+        root.querySelectorAll(".mc-view-toggle label").forEach(function (label) {
+            label.addEventListener("click", function (e) {
+                e.preventDefault();
+                let input = label.querySelector("input");
+                if (input) setView(input.value);
+            });
+        });
+        root.addEventListener("change", function (e) {
+            if (e.target.type === "checkbox") renderPreview();
+        });
+
+        root.querySelectorAll(".mc-action-toggle label").forEach(function (label) {
+            label.addEventListener("click", function (e) {
+                e.preventDefault();
+                let input = label.querySelector("input");
+                if (input) setAction(input.value);
+            });
+        });
+        root.querySelectorAll(".mc-mode-toggle label").forEach(function (label) {
+            label.addEventListener("click", function (e) {
+                e.preventDefault();
+                if (label.classList.contains("disabled")) return;
+                let input = label.querySelector("input");
+                if (input) setMode(input.value);
+            });
+        });
+
+        root.addEventListener("input", function (e) {
+            if (e.target.classList && (e.target.classList.contains("mc-input") || e.target.classList.contains("mc-field-input"))) {
+                renderPreview();
+            }
+        });
+
+        let loadBtn = document.getElementById("mc-load-btn");
+        if (loadBtn) loadBtn.addEventListener("click", loadMessage);
+
+        els.form.addEventListener("submit", onSubmit);
+
+        setAction("create");
+        setMode("normal");
+        renderEmbeds();
+        if (window.YAGEmojiPicker) YAGEmojiPicker.enhance(root);
+    }
+
+    function base() { return "/manage/" + els.guildID + "/messagecreator"; }
+
+    function syncToggle(name) {
+        els.root.querySelectorAll("input[name=" + name + "]").forEach(function (r) {
+            let label = r.closest("label");
+            if (label) label.classList.toggle("active", r.checked);
+        });
+    }
+
+    function setAction(action) {
+        currentAction = action;
+        let creating = action === "create";
+        els.root.querySelectorAll("input[name=mc-action]").forEach(function (r) { r.checked = r.value === action; });
+        syncToggle("mc-action");
+
+        show(els.root.querySelector(".mc-when-create"), creating);
+        show(els.root.querySelector(".mc-when-existing"), !creating);
+
+        if (creating) {
+            els.submit.className = "btn btn-success btn-block";
+            els.submitLabel.textContent = "Create message";
+            els.submit.disabled = false;
+            show(els.editHint, false);
+            setTypeLock(null);
+        } else {
+            els.submit.className = "btn btn-warning btn-block";
+            els.submitLabel.textContent = "Edit Message";
+            els.submit.disabled = !loadedForEdit;
+            show(els.editHint, !loadedForEdit);
+        }
+    }
+
+    function setPane(pane) {
+        els.root.setAttribute("data-pane", pane);
+        els.root.querySelectorAll("input[name=mc-pane]").forEach(function (r) { r.checked = r.value === pane; });
+        syncToggle("mc-pane");
+        if (pane !== "edit") setView(pane);
+        window.scrollTo(0, els.root.getBoundingClientRect().top + window.scrollY - 70);
+    }
+
+    function setView(view) {
+        let code = view === "code";
+        els.root.querySelectorAll("input[name=mc-view]").forEach(function (r) { r.checked = r.value === view; });
+        syncToggle("mc-view");
+        show(els.preview, !code);
+        show(els.codeView, code);
+        show(els.codeCopy, code);
+    }
+
+    function setMode(mode) {
+        currentMode = mode;
+        els.root.querySelectorAll("input[name=mc-mode]").forEach(function (r) { r.checked = r.value === mode; });
+        syncToggle("mc-mode");
+
+        let v2 = mode === "componentsv2";
+        show(els.normalFields, !v2);
+        els.componentsLabel.innerHTML = v2
+            ? "Components"
+            : 'Components <small class="text-muted">optional, buttons and menus</small>';
+        els.modeHint.textContent = v2
+            ? "Components V2: content & embeds are replaced by components (Text, Container, Section, …)."
+            : "Normal message: content, an embed, and up to 5 rows of buttons / select menus.";
+
+        renderBuilder();
+        renderPreview();
+    }
+
+    function setTypeLock(lockedMode) {
+        let radios = els.root.querySelectorAll("input[name=mc-mode]");
+        if (lockedMode) {
+            setMode(lockedMode);
+            radios.forEach(function (r) {
+                let label = r.closest("label");
+                if (label) label.classList.toggle("disabled", r.value !== lockedMode);
+            });
+            els.typeLockNote.style.display = "";
+            els.typeLockNote.textContent = lockedMode === "componentsv2"
+                ? "This is a Components V2 message - its type can't be changed when editing."
+                : "Editing an existing message - its type can't be changed.";
+        } else {
+            radios.forEach(function (r) {
+                let label = r.closest("label");
+                if (label) label.classList.remove("disabled");
+            });
+            els.typeLockNote.style.display = "none";
+        }
+    }
+
+    function onSubmit(e) {
+        els.form.action = base() + "/" + (currentAction === "create" ? "send" : "edit");
+        let msg = computeMessage().message;
+        let errs = validateComposed(msg, currentMode);
+        if (errs.length) {
+            e.preventDefault(); e.stopPropagation();
+            showErrors(errs);
+            return;
+        }
+        clearErrors();
+        document.getElementById("mc-f-mode").value = currentMode;
+        document.getElementById("mc-f-payload").value = JSON.stringify(msg);
+    }
+
+    function showErrors(errs) {
+        els.errors.innerHTML = "<strong>Please fix the following before sending:</strong>" +
+            "<ul class='mb-0 mt-1'>" + errs.map(function (s) { return "<li>" + escapeHtml(s) + "</li>"; }).join("") + "</ul>";
+        els.errors.style.display = "";
+        els.errors.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    function clearErrors() { els.errors.style.display = "none"; els.errors.innerHTML = ""; }
+
+    function charLen(s) { return s ? String(s).length : 0; }
+    function isURL(s) { return /^https?:\/\//i.test(s) || /^attachment:\/\//i.test(s); }
+
+    function countAllComponents(comps) {
+        let n = 0;
+        (comps || []).forEach(function (c) {
+            n++;
+            if (c.components) n += countAllComponents(c.components);
+            if (c.accessory) n++;
+        });
+        return n;
+    }
+
+    function validateComposed(msg, mode) {
+        let errs = [];
+        if (mode === "normal") {
+            if (charLen(msg.content) > 2000) errs.push("Message content exceeds 2000 characters.");
+            let embeds = msg.embeds || [];
+            if (embeds.length > 10) errs.push("A message can have at most 10 embeds.");
+            embeds.forEach(function (e, i) { validateEmbed(e, i + 1, errs); });
+            if (!msg.content && !embeds.length && !(msg.components || []).length) {
+                errs.push("Add content, an embed, or a component before sending.");
+            }
+            let rows = (msg.components || []).filter(function (c) { return c.type === 1; }).length;
+            if (rows > 5) errs.push("A message can have at most 5 action rows.");
+        } else {
+            if (!(msg.components || []).length) errs.push("Add at least one component for a Components V2 message.");
+            if (countAllComponents(msg.components) > 40) errs.push("A Components V2 message can have at most 40 components in total.");
+        }
+        validateComponents(msg.components || [], errs);
+        return errs;
+    }
+
+    function validateEmbed(e, n, errs) {
+        let total = 0;
+        if (charLen(e.title) > 256) errs.push("Embed " + n + ": title exceeds 256 characters.");
+        if (charLen(e.description) > 4096) errs.push("Embed " + n + ": description exceeds 4096 characters.");
+        total += charLen(e.title) + charLen(e.description);
+        if (e.author) { if (charLen(e.author.name) > 256) errs.push("Embed " + n + ": author name exceeds 256 characters."); total += charLen(e.author.name); }
+        if (e.footer) { if (charLen(e.footer.text) > 2048) errs.push("Embed " + n + ": footer text exceeds 2048 characters."); total += charLen(e.footer.text); }
+        let fields = e.fields || [];
+        if (fields.length > 25) errs.push("Embed " + n + ": at most 25 fields.");
+        fields.forEach(function (f, fi) {
+            if (!f.name || !f.value) errs.push("Embed " + n + " field " + (fi + 1) + ": both name and value are required.");
+            if (charLen(f.name) > 256) errs.push("Embed " + n + " field " + (fi + 1) + ": name exceeds 256 characters.");
+            if (charLen(f.value) > 1024) errs.push("Embed " + n + " field " + (fi + 1) + ": value exceeds 1024 characters.");
+            total += charLen(f.name) + charLen(f.value);
+        });
+        if (total > 6000) errs.push("Embed " + n + ": total text exceeds 6000 characters.");
+        [e.url, e.image && e.image.url, e.thumbnail && e.thumbnail.url, e.author && e.author.icon_url, e.footer && e.footer.icon_url]
+            .forEach(function (u) { if (u && !isURL(u)) errs.push("Embed " + n + ": \"" + u + "\" is not a valid URL (must start with http:// or https://)."); });
+    }
+
+    function validateComponents(comps, errs) {
+        comps.forEach(function (c) {
+            switch (c.type) {
+                case 1:
+                    let items = c.components || [];
+                    if (!items.length) errs.push("An action row is empty - add a button or select menu, or remove it.");
+                    if (items.length > 5) errs.push("An action row can have at most 5 components.");
+                    if (items.some(function (x) { return x.type !== 2; }) && items.length > 1) {
+                        errs.push("A select menu can't share an action row with other components.");
+                    }
+                    items.forEach(function (x) { validateInteractive(x, errs); });
+                    break;
+                case 17:
+                    if (!(c.components || []).length) errs.push("A container must contain at least one component.");
+                    validateComponents(c.components || [], errs);
+                    break;
+                case 9:
+                    if (!(c.components || []).some(function (t) { return t.type === 10 && t.content; })) errs.push("A section needs at least one non-empty text component.");
+                    if (!c.accessory) errs.push("A section needs an accessory (button or thumbnail).");
+                    else if (c.accessory.type === 2) validateInteractive(c.accessory, errs);
+                    else if (c.accessory.type === 11 && !(c.accessory.media && c.accessory.media.url)) errs.push("A section thumbnail needs an image URL.");
+                    break;
+                case 10:
+                    if (!c.content) errs.push("A text component can't be empty.");
+                    if (charLen(c.content) > 4000) errs.push("A text component exceeds 4000 characters.");
+                    break;
+                case 12:
+                    if (!(c.items || []).length) errs.push("A media gallery needs at least one item.");
+                    (c.items || []).forEach(function (it) {
+                        if (!(it.media && it.media.url)) errs.push("A media gallery item needs an image URL.");
+                        else if (!isURL(it.media.url)) errs.push("A media gallery URL must start with http:// or https://.");
+                    });
+                    break;
+            }
+        });
+    }
+
+    function validateInteractive(c, errs) {
+        if (c.type === 2) {
+            if (c.style === 5) {
+                if (!c.url) errs.push("A link button needs a URL.");
+                else if (!isURL(c.url)) errs.push("A link button URL must start with http:// or https://.");
+            } else if (!c.label && !(c.emoji && c.emoji.name)) {
+                errs.push("A button needs a label or emoji.");
+            }
+            if (charLen(c.label) > 80) errs.push("A button label exceeds 80 characters.");
+            if (c.custom_id && charLen(c.custom_id) > MAX_CUSTOM_ID) errs.push("A button custom id is too long (max " + MAX_SUFFIX + " characters, plus the templates- prefix).");
+        } else {
+            if (charLen(c.placeholder) > 150) errs.push("A select placeholder exceeds 150 characters.");
+            if (c.custom_id && charLen(c.custom_id) > MAX_CUSTOM_ID) errs.push("A select custom id is too long (max " + MAX_SUFFIX + " characters, plus the templates- prefix).");
+            if (!c.type || c.type === 3) {
+                let opts = c.options || [];
+                if (opts.length < 1 || opts.length > 25) errs.push("A text-options select menu needs between 1 and 25 options.");
+                let seen = {};
+                opts.forEach(function (o, oi) {
+                    if (!o.label) errs.push("Select option " + (oi + 1) + " needs a label.");
+                    if (!o.value) errs.push("Select option " + (oi + 1) + " needs a value.");
+                    else { if (seen[o.value]) errs.push("Select option values must be unique."); seen[o.value] = true; }
+                });
+            }
+            if (c.min_values != null && (c.min_values < 0 || c.min_values > 25)) errs.push("Select min values must be between 0 and 25.");
+            if (c.max_values != null && (c.max_values < 1 || c.max_values > 25)) errs.push("Select max values must be between 1 and 25.");
+            if (c.min_values != null && c.max_values != null && c.min_values > c.max_values) errs.push("Select min values can't exceed max values.");
+        }
+    }
+
+    function escapeHtml(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+
+
+    function fieldValue(id) { let el = document.getElementById(id); return el ? el.value.trim() : ""; }
+
+    function defEmbed() {
+        return {
+            title: "", url: "", description: "", color: undefined,
+            authorName: "", authorIcon: "", footerText: "", footerIcon: "",
+            imageUrl: "", thumbUrl: "", ts: false, fields: []
+        };
+    }
+
+    function renderEmbeds() {
+        if (!els.embedsBuilder) return;
+        els.embedsBuilder.innerHTML = "";
+        state.embeds.forEach(function (e, i) { els.embedsBuilder.appendChild(embedCard(e, i)); });
+        els.embedsAddBar.innerHTML = "";
+        if (state.embeds.length < 10) {
+            els.embedsAddBar.appendChild(btn('<i class="fas fa-plus"></i> Add embed', "btn-block btn-outline-primary", function () {
+                state.embeds.push(defEmbed()); renderEmbeds(); renderPreview();
+            }));
+        }
+    }
+
+    function embedCard(e, idx) {
+        let node = nodeCard("Embed " + (idx + 1), state.embeds, idx, rebuildEmbeds);
+        let card = node.body;
+
+        card.appendChild(el("div", { class: "form-row" }, [
+            el("div", { class: "col-md-8" }, [field("Title", e.title, function (v) { e.title = v; refreshPreview(); })]),
+            el("div", { class: "col-md-4" }, [colorField("Color", e.color, function (v) { e.color = v; refreshPreview(); })])
+        ]));
+        card.appendChild(field("Title URL", e.url, function (v) { e.url = v; refreshPreview(); }, { placeholder: "https://..." }));
+        card.appendChild(field("Description", e.description, function (v) { e.description = v; refreshPreview(); }, { textarea: true, rows: 3, emojiPicker: "insert" }));
+        card.appendChild(el("div", { class: "form-row" }, [
+            el("div", { class: "col-md-6" }, [field("Image URL", e.imageUrl, function (v) { e.imageUrl = v; refreshPreview(); }, { placeholder: "https://..." })]),
+            el("div", { class: "col-md-6" }, [field("Thumbnail URL", e.thumbUrl, function (v) { e.thumbUrl = v; refreshPreview(); }, { placeholder: "https://..." })])
+        ]));
+        card.appendChild(el("div", { class: "form-row" }, [
+            el("div", { class: "col-md-6" }, [field("Author name", e.authorName, function (v) { e.authorName = v; refreshPreview(); })]),
+            el("div", { class: "col-md-6" }, [field("Author icon URL", e.authorIcon, function (v) { e.authorIcon = v; refreshPreview(); }, { placeholder: "https://..." })])
+        ]));
+        card.appendChild(el("div", { class: "form-row" }, [
+            el("div", { class: "col-md-8" }, [field("Footer text", e.footerText, function (v) { e.footerText = v; refreshPreview(); })]),
+            el("div", { class: "col-md-4" }, [field("Footer icon URL", e.footerIcon, function (v) { e.footerIcon = v; refreshPreview(); }, { placeholder: "https://..." })])
+        ]));
+        card.appendChild(switchField("Include current timestamp in footer", !!e.ts, function (on) { e.ts = on; refreshPreview(); }, "mb-2"));
+
+        card.appendChild(el("hr", { class: "my-2" }));
+        card.appendChild(el("label", { class: "small d-block mb-1" }, ["Fields"]));
+        e.fields = e.fields || [];
+        e.fields.forEach(function (f, fi) {
+            card.appendChild(el("div", { class: "mc-opt-row" }, [
+                inlineInput("Field name", f.name, function (v) { f.name = v; refreshPreview(); }),
+                inlineInput("Field value", f.value, function (v) { f.value = v; refreshPreview(); }),
+                switchField("Inline", !!f.inline, function (on) { f.inline = on; refreshPreview(); }, "small text-nowrap", true),
+                removeBtn("Remove field", function () { e.fields.splice(fi, 1); renderEmbeds(); renderPreview(); })
+            ]));
+        });
+        if (e.fields.length < 25) {
+            card.appendChild(btn("+ Field", "btn-block btn-outline-secondary", function () { e.fields.push({ name: "", value: "", inline: false }); renderEmbeds(); renderPreview(); }));
+        }
+        return node.card;
+    }
+
+    // Build clean Discord embed objects from the model, dropping empty ones.
+    function buildEmbeds() {
+        let out = [];
+        state.embeds.forEach(function (e) {
+            let emb = {};
+            if (e.title) emb.title = e.title;
+            if (e.url) emb.url = e.url;
+            if (e.description) emb.description = e.description;
+            if (typeof e.color === "number") emb.color = e.color;
+            if (e.authorName || e.authorIcon) { emb.author = {}; if (e.authorName) emb.author.name = e.authorName; if (e.authorIcon) emb.author.icon_url = e.authorIcon; }
+            if (e.footerText || e.footerIcon) { emb.footer = {}; if (e.footerText) emb.footer.text = e.footerText; if (e.footerIcon) emb.footer.icon_url = e.footerIcon; }
+            if (e.imageUrl) emb.image = { url: e.imageUrl };
+            if (e.thumbUrl) emb.thumbnail = { url: e.thumbUrl };
+            if (e.ts) emb.timestamp = new Date().toISOString();
+            let fields = (e.fields || []).filter(function (f) { return f.name || f.value; })
+                .map(function (f) { return { name: f.name || "", value: f.value || "", inline: !!f.inline }; });
+            if (fields.length) emb.fields = fields;
+            if (Object.keys(emb).length) out.push(emb);
+        });
+        return out;
+    }
+
+    // A checkbox + color picker bound to an optional numeric color (undefined = no color).
+    function colorPicker(value, oninput) {
+        let cur = (typeof value === "number") ? intToHex(value) : "#5865f2";
+        let swatch = el("span", { class: "mc-color-swatch" }); swatch.style.background = cur;
+        let hexIn = el("input", { class: "form-control form-control-sm", maxlength: "7" });
+        hexIn.value = cur; hexIn.style.maxWidth = "110px";
+        function apply(h, fromHexInput) {
+            h = h.trim(); if (h[0] !== "#") h = "#" + h;
+            if (!/^#[0-9a-fA-F]{6}$/.test(h)) return;
+            swatch.style.background = h;
+            if (!fromHexInput) hexIn.value = h;
+            oninput(hexToInt(h));
+        }
+        hexIn.addEventListener("input", function () { apply(hexIn.value, true); });
+        let palette = el("div", { class: "mc-color-palette" });
+        PRESET_COLORS.forEach(function (c) {
+            let s = el("span", { class: "mc-color-swatch mc-color-preset" });
+            s.style.background = c; s.title = c;
+            s.addEventListener("click", function () { apply(c, false); });
+            palette.appendChild(s);
+        });
+        return el("div", {}, [el("div", { class: "d-flex align-items-center", style: "gap:6px;" }, [swatch, hexIn]), palette]);
+    }
+
+    // Optional-color field: a checkbox enables the color picker; unchecked means no color.
+    function colorField(labelText, value, oninput) {
+        let selected = (typeof value === "number") ? value : hexToInt("#5865f2");
+        let enabled = typeof value === "number";
+        let on = enabled;
+        let pickerWrap = el("div", { class: "mt-1" }, [colorPicker(value, function (v) { selected = v; if (on) oninput(v); })]);
+        show(pickerWrap, enabled);
+        return el("div", { class: "form-group mb-2" }, [
+            switchField(labelText, enabled, function (checked) { on = checked; show(pickerWrap, on); oninput(on ? selected : undefined); }, "small", true),
+            pickerWrap
+        ]);
+    }
+
+    function showCompError(msg) { if (els.compError) els.compError.textContent = msg || ""; }
+
+
+    // refreshPreview: a field changed - refresh the preview without rebuilding the editor (keeps
+    // input focus). rebuildEditor: structure changed - re-render the whole builder.
+    function refreshPreview() { renderPreview(); }
+    function rebuildEditor() { renderBuilder(); renderPreview(); }
+
+    function rebuildEmbeds() { renderEmbeds(); renderPreview(); }
+
+    function move(list, idx, delta, onChange) {
+        let j = idx + delta;
+        if (j < 0 || j >= list.length) return;
+        let tmp = list[idx]; list[idx] = list[j]; list[j] = tmp;
+        (onChange || rebuildEditor)();
+    }
+
+    function renderBuilder() {
+        els.builder.innerHTML = "";
+        state.components.forEach(function (node, i) { els.builder.appendChild(renderNode(node, state.components, i)); });
+        els.addBar.innerHTML = "";
+        els.addBar.appendChild(makeAddBar(state.components, currentMode === "componentsv2" ? "v2top" : "normaltop"));
+    }
+
+    function defButton() { return { type: 2, style: 1, label: "Button", custom_id: "" }; }
+    function defSelect() { return { type: 3, placeholder: "", custom_id: "", options: [{ label: "Option 1", value: "1" }] }; }
+    function defActionRow() { return { type: 1, components: [] }; }
+    function defText() { return { type: 10, content: "" }; }
+    function defSection() { return { type: 9, components: [{ type: 10, content: "Section text" }], accessory: defButton() }; }
+    function defContainer() { return { type: 17, accent_color: 5793266, components: [] }; }
+    function defSeparator() { return { type: 14, divider: true, spacing: 1 }; }
+    function defGallery() { return { type: 12, items: [{ media: { url: "" } }] }; }
+
+    function makeAddBar(list, context) {
+        let bar = el("div", { class: "mc-add-bar" });
+        function add(label, factory) {
+            bar.appendChild(btn(label, "btn-sm btn-outline-primary", function () { list.push(factory()); rebuildEditor(); }));
+        }
+        if (context === "normaltop") {
+            add("+ Action row", defActionRow);
+        } else {
+            add("+ Text", defText);
+            add("+ Action row", defActionRow);
+            add("+ Section", defSection);
+            if (context === "v2top") add("+ Container", defContainer);
+            add("+ Separator", defSeparator);
+            add("+ Media gallery", defGallery);
+        }
+        return bar;
+    }
+
+    // nodeCard builds the card for one embed or component, with move and remove buttons in its header.
+    function nodeCard(title, list, idx, onChange) {
+        onChange = onChange || rebuildEditor;
+        let tools = el("div", { class: "btn-group btn-group-sm mc-node-tools" }, [
+            btn('<i class="fas fa-chevron-up"></i>', "btn-primary", function () { move(list, idx, -1, onChange); }, { title: "Move up" }),
+            btn('<i class="fas fa-chevron-down"></i>', "btn-primary", function () { move(list, idx, 1, onChange); }, { title: "Move down" }),
+            btn('<i class="fas fa-trash"></i>', "btn-danger", function () { list.splice(idx, 1); onChange(); }, { noconfirm: true, title: "Remove" })
+        ]);
+        let body = el("div", { class: "card-body" });
+        let card = el("section", { class: "card mc-node" }, [
+            el("header", { class: "card-header" }, [el("h2", { class: "card-title" }, [title]), tools]),
+            body
+        ]);
+        return { card: card, body: body };
+    }
+
+    function renderNode(node, list, idx) {
+        let wrap = nodeCard(NODE_TITLES[node.type] || ("Type " + node.type), list, idx);
+        let card = wrap.body;
+        let body;
+        switch (node.type) {
+            case 10: body = field("Text (markdown supported)", node.content, function (v) { node.content = v; refreshPreview(); }, { textarea: true, rows: 2, emojiPicker: "insert" }); break;
+            case 14: body = separatorBody(node); break;
+            case 1: body = actionRowBody(node); break;
+            case 9: body = sectionBody(node); break;
+            case 17: body = containerBody(node); break;
+            case 12: body = galleryBody(node); break;
+            default: body = el("div", { class: "text-muted small" }, ["Unsupported component type " + node.type]);
+        }
+        card.appendChild(body);
+        return wrap.card;
+    }
+
+    function separatorBody(node) {
+        let wrap = el("div");
+        wrap.appendChild(switchField("Show divider line", node.divider !== false, function (on) { node.divider = on; refreshPreview(); }, "small mb-2"));
+        wrap.appendChild(selectField("Spacing", [{ v: 1, t: "Small" }, { v: 2, t: "Large" }], node.spacing || 1, function (v) { node.spacing = parseInt(v); refreshPreview(); }));
+        return wrap;
+    }
+
+    function actionRowBody(node) {
+        node.components = node.components || [];
+        let hasSelect = node.components.some(function (c) { return c.type !== 2; });
+        let body = el("div");
+        node.components.forEach(function (child, ci) { body.appendChild(interactiveEditor(child, node.components, ci)); });
+        let bar = el("div", { class: "mc-add-bar mt-1" });
+        if (node.components.length === 0) {
+            bar.appendChild(btn("+ Button", "btn-block btn-outline-secondary", function () { node.components.push(defButton()); rebuildEditor(); }));
+            bar.appendChild(btn("+ Select menu", "btn-block btn-outline-secondary", function () { node.components.push(defSelect()); rebuildEditor(); }));
+            bar.appendChild(el("span", { class: "small text-muted ml-1" }, ["Up to 5 buttons, or one select menu."]));
+        } else if (hasSelect) {
+            bar.appendChild(el("span", { class: "small text-muted" }, ["A select menu takes up the whole row."]));
+        } else if (node.components.length < 5) {
+            bar.appendChild(btn("+ Button", "btn-block btn-outline-secondary", function () { node.components.push(defButton()); rebuildEditor(); }));
+        }
+        body.appendChild(bar);
+        return body;
+    }
+
+    function interactiveEditor(child, list, idx) {
+        let wrap = nodeCard(child.type === 2 ? "Button" : "Select menu", list, idx);
+        wrap.body.appendChild(child.type === 2 ? buttonEditor(child) : selectEditor(child));
+        return wrap.card;
+    }
+
+    function buttonEditor(node) {
+        let wrap = el("div");
+        wrap.appendChild(selectField("Style",
+            [{ v: 1, t: "Primary" }, { v: 2, t: "Secondary" }, { v: 3, t: "Success" }, { v: 4, t: "Danger" }, { v: 5, t: "Link" }],
+            node.style || 1, function (v) {
+                node.style = parseInt(v);
+                if (node.style === 5) { delete node.custom_id; if (node.url == null) node.url = ""; }
+                else { delete node.url; if (node.custom_id == null) node.custom_id = ""; }
+                rebuildEditor();
+            }));
+        wrap.appendChild(field("Label", node.label, function (v) { node.label = v; refreshPreview(); }));
+        if (node.style === 5) {
+            wrap.appendChild(field("URL", node.url, function (v) { node.url = v; refreshPreview(); }, { placeholder: "https://..." }));
+        } else {
+            wrap.appendChild(customIdField(node));
+        }
+        wrap.appendChild(field("Emoji (optional)", formatEmoji(node.emoji), function (v) {
+            let emoji = parseEmoji(v);
+            if (emoji) node.emoji = emoji; else delete node.emoji; refreshPreview();
+        }, { placeholder: "e.g. 🔥", emojiPicker: "replace" }));
+        return wrap;
+    }
+
+    function selectEditor(node) {
+        let wrap = el("div");
+        wrap.appendChild(selectField("Menu type",
+            [{ v: 3, t: "Text options" }, { v: 5, t: "Users" }, { v: 6, t: "Roles" }, { v: 7, t: "Users & roles" }, { v: 8, t: "Channels" }],
+            node.type || 3, function (v) {
+                node.type = parseInt(v);
+                if (node.type === 3) { if (!node.options) node.options = [{ label: "Option 1", value: "1" }]; }
+                else { delete node.options; }
+                rebuildEditor();
+            }));
+        wrap.appendChild(field("Placeholder", node.placeholder, function (v) { node.placeholder = v; refreshPreview(); }));
+        wrap.appendChild(customIdField(node));
+        wrap.appendChild(el("div", { class: "form-row" }, [
+            el("div", { class: "col" }, [numField("Min values", node.min_values, function (v) { if (v == null) delete node.min_values; else node.min_values = v; refreshPreview(); })]),
+            el("div", { class: "col" }, [numField("Max values", node.max_values, function (v) { if (v == null) delete node.max_values; else node.max_values = v; refreshPreview(); })])
+        ]));
+        // Only "Text options" menus carry an explicit option list; the other types are auto-populated by Discord.
+        if (!node.type || node.type === 3) {
+            node.options = node.options || [];
+            wrap.appendChild(el("label", { class: "small mb-1 d-block" }, ["Options"]));
+            node.options.forEach(function (opt, oi) {
+                wrap.appendChild(el("div", { class: "mc-opt-row" }, [
+                    optionEmojiButton(opt),
+                    inlineInput("Label", opt.label, function (v) { opt.label = v; refreshPreview(); }),
+                    inlineInput("Value", opt.value, function (v) { opt.value = v; refreshPreview(); }),
+                    inlineInput("Description", opt.description, function (v) { if (v) opt.description = v; else delete opt.description; refreshPreview(); }),
+                    node.options.length > 1 ? removeBtn("Remove option", function () { node.options.splice(oi, 1); rebuildEditor(); }) : null
+                ]));
+            });
+            if (node.options.length < 25) {
+                wrap.appendChild(btn("+ Option", "btn-block btn-outline-secondary", function () {
+                    node.options.push({ label: "Option " + (node.options.length + 1), value: String(node.options.length + 1) }); rebuildEditor();
+                }));
+            }
+        }
+        return wrap;
+    }
+
+    function sectionBody(node) {
+        node.components = node.components || [defText()];
+        node.accessory = node.accessory || defButton();
+        let body = el("div");
+        node.components.forEach(function (td, ti) {
+            let ta = el("textarea", { class: "form-control form-control-sm", placeholder: "Text" }); ta.rows = 2; ta.value = td.content || "";
+            ta.addEventListener("input", function () { td.content = ta.value; refreshPreview(); });
+            body.appendChild(el("div", { class: "mc-opt-row" }, [
+                ta,
+                node.components.length > 1 ? removeBtn("Remove text", function () { node.components.splice(ti, 1); rebuildEditor(); }) : null
+            ]));
+        });
+        if (node.components.length < 3) body.appendChild(btn("+ Text", "btn-block btn-outline-secondary", function () { node.components.push(defText()); rebuildEditor(); }));
+        body.appendChild(el("hr", { class: "my-2" }));
+        body.appendChild(selectField("Accessory", [{ v: 2, t: "Button" }, { v: 11, t: "Thumbnail" }], node.accessory.type, function (v) {
+            node.accessory = parseInt(v) === 2 ? defButton() : { type: 11, media: { url: "" } };
+            rebuildEditor();
+        }));
+        if (node.accessory.type === 2) body.appendChild(buttonEditor(node.accessory));
+        else body.appendChild(field("Thumbnail URL", node.accessory.media && node.accessory.media.url, function (v) { node.accessory.media = { url: v }; refreshPreview(); }, { placeholder: "https://..." }));
+        return body;
+    }
+
+    function containerBody(node) {
+        node.components = node.components || [];
+        let body = el("div");
+        body.appendChild(colorField("Accent color", node.accent_color, function (v) {
+            if (v == null) delete node.accent_color; else node.accent_color = v;
+            refreshPreview();
+        }));
+        node.components.forEach(function (child, ci) { body.appendChild(renderNode(child, node.components, ci)); });
+        body.appendChild(makeAddBar(node.components, "v2container"));
+        return body;
+    }
+
+    function galleryBody(node) {
+        node.items = node.items || [{ media: { url: "" } }];
+        let body = el("div");
+        node.items.forEach(function (it, ii) {
+            it.media = it.media || { url: "" };
+            body.appendChild(el("div", { class: "mc-opt-row" }, [
+                inlineInput("Image / video URL", it.media.url, function (v) { it.media.url = v; refreshPreview(); }),
+                inlineInput("Description (optional)", it.description, function (v) { if (v) it.description = v; else delete it.description; refreshPreview(); }),
+                node.items.length > 1 ? removeBtn("Remove item", function () { node.items.splice(ii, 1); rebuildEditor(); }) : null
+            ]));
+        });
+        if (node.items.length < 10) body.appendChild(btn("+ Item", "btn-block btn-outline-secondary", function () { node.items.push({ media: { url: "" } }); rebuildEditor(); }));
+        return body;
+    }
+
+
+    // Finalize one interactive component's custom_id: link buttons carry none; locked components
+    // (loaded without the templates- prefix) keep their id verbatim; everything else gets the
+    // "templates-" prefix added to the user-entered suffix (blank stays blank for server auto-fill).
+    function finalizeInteractive(c) {
+        if (c.type === 2 && c.style === 5) { delete c.custom_id; delete c._locked; return; }
+        if (c._locked) { delete c._locked; return; }
+        delete c._locked;
+        let s = (c.custom_id || "").trim();
+        c.custom_id = s ? (TEMPLATE_PREFIX + s) : "";
+    }
+
+    function finalizeWalk(arr) {
+        arr.forEach(function (c) {
+            if (c.type === 1) (c.components || []).forEach(finalizeInteractive);
+            else if (c.type === 17) finalizeWalk(c.components || []);
+            else if (c.type === 9 && c.accessory) finalizeInteractive(c.accessory);
+        });
+    }
+
+    // Loaded (edit) inverse of finalizeInteractive: strip the templates- prefix to show the bare
+    // suffix; ids that were never templated are flagged _locked so the UI won't let them be edited.
+    function adaptInteractive(c) {
+        if (c.type === 2 && c.style === 5) return; // link button, no custom_id
+        let id = c.custom_id || "";
+        if (id.indexOf(TEMPLATE_PREFIX) === 0) { c.custom_id = id.slice(TEMPLATE_PREFIX.length); c._locked = false; }
+        else if (id) { c._locked = true; }
+        else { c.custom_id = ""; c._locked = false; }
+    }
+
+    function adaptLoadedComponents(arr) {
+        arr.forEach(function (c) {
+            if (c.type === 1) (c.components || []).forEach(adaptInteractive);
+            else if (c.type === 17) adaptLoadedComponents(c.components || []);
+            else if (c.type === 9 && c.accessory) adaptInteractive(c.accessory);
+        });
+    }
+
+    // Drop empty action rows / containers so we never send an invalid (empty) row to Discord.
+    function pruneEmpty(comps) {
+        let out = [];
+        comps.forEach(function (c) {
+            if (c.type === 1) { if (c.components && c.components.length) out.push(c); }
+            else if (c.type === 17) { c.components = pruneEmpty(c.components || []); if (c.components.length) out.push(c); }
+            else out.push(c);
+        });
+        return out;
+    }
+
+    // Deep-clone the live model, finalize custom_ids, and prune empties for the outgoing payload.
+    function buildComponents(comps) {
+        let clone = JSON.parse(JSON.stringify(comps || []));
+        finalizeWalk(clone);
+        return pruneEmpty(clone);
+    }
+
+    function computeMessage() {
+        let comps = buildComponents(state.components);
+        if (currentMode === "componentsv2") return { message: { components: comps } };
+        let msg = {};
+        let content = fieldValue("embed-content"); if (content) msg.content = content;
+        let embeds = buildEmbeds(); if (embeds.length) msg.embeds = embeds;
+        if (comps.length) msg.components = comps;
+        return { message: msg };
+    }
+
+    function renderPreview() {
+        if (!els.preview) return;
+        let msg = computeMessage().message;
+        els.preview.innerHTML = "";
+        if (msg.content) els.preview.appendChild(renderText(msg.content, "mc-content"));
+        if (msg.embeds) msg.embeds.forEach(function (e) { els.preview.appendChild(renderEmbed(e)); });
+        if (msg.components) renderComponents(msg.components, els.preview);
+        if (!els.preview.childNodes.length) els.preview.appendChild(div("text-muted", "Nothing to preview yet."));
+        renderCode(msg);
+    }
+
+    // ---- Custom command code ----
+    // The generated code is a tree of calls: {fn, entries}, where each entry is one line of items,
+    // so key/value pairs stay together.
+
+    let CODE_INDENT = "\t";
+    let BUTTON_STYLE_NAMES = { 1: "primary", 2: "secondary", 3: "success", 4: "danger", 5: "link" };
+    let MENU_TYPE_NAMES = { 5: "user", 6: "role", 7: "mentionable", 8: "channel" };
+
+    function codeString(s) {
+        s = String(s);
+        if (s.indexOf("\n") !== -1 && s.indexOf("`") === -1) return "`" + s + "`";
+        return JSON.stringify(s);
+    }
+
+    function codeCall(fn, entries) { return { fn: fn, entries: entries }; }
+    function codePairs(fn, pairs) { return codeCall(fn, pairs.map(function (p) { return [codeString(p[0]), p[1]]; })); }
+    function codeSlice(items) { return codeCall("cslice", items.map(function (i) { return [i]; })); }
+
+    function codeRender(x, depth) {
+        if (typeof x === "string") return x;
+        if (!x.entries.length) return "(" + x.fn + ")";
+        let pad = CODE_INDENT.repeat(depth + 1);
+        return "(" + x.fn + "\n" + x.entries.map(function (e) {
+            return pad + e.map(function (i) { return codeRender(i, depth + 1); }).join(" ");
+        }).join("\n") + "\n" + CODE_INDENT.repeat(depth) + ")";
+    }
+
+    function codeSend(call) { return "{{ sendMessage nil " + codeRender(call, 0) + " }}"; }
+
+    function codeValue(v) {
+        if (Array.isArray(v)) return codeSlice(v.map(codeValue));
+        if (v && typeof v === "object") return codePairs("sdict", Object.keys(v).map(function (k) { return [k, codeValue(v[k])]; }));
+        if (typeof v === "string") return codeString(v);
+        return String(v);
+    }
+
+    function codeEmoji(emoji) {
+        let pairs = [];
+        if (emoji.id) pairs.push(["id", codeString(emoji.id)]);
+        pairs.push(["name", codeString(emoji.name || "")]);
+        if (emoji.animated) pairs.push(["animated", "true"]);
+        return codePairs("sdict", pairs);
+    }
+
+    function codeCustomID(id) {
+        id = id || "";
+        return id.indexOf(TEMPLATE_PREFIX) === 0 ? id.slice(TEMPLATE_PREFIX.length) : id;
+    }
+
+    function codeButton(b) {
+        let pairs = [];
+        if (b.label) pairs.push(["label", codeString(b.label)]);
+        if (b.emoji) pairs.push(["emoji", codeEmoji(b.emoji)]);
+        pairs.push(["style", codeString(BUTTON_STYLE_NAMES[b.style] || "primary")]);
+        if (b.style === 5) pairs.push(["url", codeString(b.url || "")]);
+        else if (codeCustomID(b.custom_id)) pairs.push(["custom_id", codeString(codeCustomID(b.custom_id))]);
+        if (b.disabled) pairs.push(["disabled", "true"]);
+        return codePairs("cbutton", pairs);
+    }
+
+    function codeMenu(m) {
+        let pairs = [];
+        if (MENU_TYPE_NAMES[m.type]) pairs.push(["type", codeString(MENU_TYPE_NAMES[m.type])]);
+        if (codeCustomID(m.custom_id)) pairs.push(["custom_id", codeString(codeCustomID(m.custom_id))]);
+        if (m.placeholder) pairs.push(["placeholder", codeString(m.placeholder)]);
+        if (m.min_values != null) pairs.push(["min_values", String(m.min_values)]);
+        if (m.max_values != null) pairs.push(["max_values", String(m.max_values)]);
+        if (m.disabled) pairs.push(["disabled", "true"]);
+        if (m.options && m.options.length) {
+            pairs.push(["options", codeSlice(m.options.map(function (o) {
+                let opt = [["label", codeString(o.label || "")], ["value", codeString(o.value || "")]];
+                if (o.description) opt.push(["description", codeString(o.description)]);
+                if (o.emoji) opt.push(["emoji", codeEmoji(o.emoji)]);
+                if (o.default) opt.push(["default", "true"]);
+                return codePairs("sdict", opt);
+            }))]);
+        }
+        return codePairs("cmenu", pairs);
+    }
+
+    function codeInteractive(c) { return c.type === 2 ? codeButton(c) : codeMenu(c); }
+
+    function codeEmbed(e) {
+        return codePairs("cembed", Object.keys(e).map(function (k) {
+            return [k, k === "timestamp" ? "currentTime" : codeValue(e[k])];
+        }));
+    }
+
+    function codeAllowedMentions() {
+        let parse = ["users"];
+        let roles = document.getElementById("mc-allow-role-mentions");
+        let everyone = document.getElementById("mc-allow-everyone-mentions");
+        if (roles && roles.checked) parse.push("roles");
+        if (everyone && everyone.checked) parse.push("everyone");
+        if (parse.length === 1) return null;
+        return codePairs("sdict", [["parse", codeSlice(parse.map(codeString))]]);
+    }
+
+    function codeV2Entries(comps) {
+        let entries = [];
+        comps.forEach(function (c) {
+            if (c.type === 10) {
+                entries.push(["text", codeString(c.content || "")]);
+            } else if (c.type === 9) {
+                let texts = (c.components || []).map(function (t) { return codeString(t.content || ""); });
+                let pairs = [["text", texts.length === 1 ? texts[0] : codeSlice(texts)]];
+                let acc = c.accessory;
+                if (acc && acc.type === 2) pairs.push(["button", codeButton(acc)]);
+                else if (acc && acc.type === 11) {
+                    let thumb = [["media", codeString((acc.media && acc.media.url) || "")]];
+                    if (acc.description) thumb.push(["description", codeString(acc.description)]);
+                    if (acc.spoiler) thumb.push(["spoiler", "true"]);
+                    pairs.push(["thumbnail", codePairs("sdict", thumb)]);
+                }
+                entries.push(["section", codePairs("sdict", pairs)]);
+            } else if (c.type === 12) {
+                entries.push(["gallery", codeSlice((c.items || []).map(function (it) {
+                    let item = [["media", codeString((it.media && it.media.url) || "")]];
+                    if (it.description) item.push(["description", codeString(it.description)]);
+                    if (it.spoiler) item.push(["spoiler", "true"]);
+                    return codePairs("sdict", item);
+                }))]);
+            } else if (c.type === 14) {
+                entries.push(["separator", c.spacing === 2 ? "true" : "false"]);
+            } else if (c.type === 17) {
+                let pairs = [];
+                if (typeof c.accent_color === "number") pairs.push(["color", String(c.accent_color)]);
+                if (c.spoiler) pairs.push(["spoiler", "true"]);
+                pairs.push(["components", codePairs("componentBuilder", codeV2Entries(c.components || []))]);
+                entries.push(["container", codePairs("sdict", pairs)]);
+            } else if (c.type === 1) {
+                entries.push(["interactive_components", codeSlice((c.components || []).map(codeInteractive))]);
+            }
+        });
+        return entries;
+    }
+
+    function generateCode(msg) {
+        let mentions = codeAllowedMentions();
+        if (currentMode === "componentsv2") {
+            let entries = codeV2Entries(msg.components || []);
+            if (!entries.length) return "";
+            if (mentions) entries.push(["allowed_mentions", mentions]);
+            return codeSend(codePairs("componentBuilder", entries));
+        }
+
+        let pairs = [];
+        let embeds = (msg.embeds || []).map(codeEmbed);
+        if (msg.content) pairs.push(["content", codeString(msg.content)]);
+        if (embeds.length) pairs.push(["embed", embeds.length === 1 ? embeds[0] : codeSlice(embeds)]);
+        if (msg.components && msg.components.length) {
+            pairs.push(["components", codeSlice(msg.components.map(function (row) {
+                return codeSlice((row.components || []).map(codeInteractive));
+            }))]);
+        }
+        if (mentions) pairs.push(["allowed_mentions", mentions]);
+        if (!pairs.length) return "";
+        return codeSend(codePairs("complexMessage", pairs));
+    }
+
+    function renderCode(msg) {
+        if (!els.code) return;
+        els.code.textContent = generateCode(msg) || "Add some content to get its code.";
+    }
+
+    function copyCode() {
+        let text = generateCode(computeMessage().message);
+        if (!text) return;
+        let done = function () {
+            els.codeCopy.textContent = "Copied";
+            setTimeout(function () { els.codeCopy.textContent = "Copy"; }, 1500);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () { selectCode(); });
+        } else {
+            selectCode();
+        }
+    }
+
+    function selectCode() {
+        let range = document.createRange();
+        range.selectNodeContents(els.code);
+        let sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+    }
+
+    function renderEmbed(e) {
+        let box = div("mc-embed");
+        box.style.borderLeftColor = (typeof e.color === "number") ? intToHex(e.color) : "#4f545c";
+        let top = div("mc-embed-top");
+        let main = div("mc-embed-main");
+        top.appendChild(main);
+        if (e.thumbnail && e.thumbnail.url) top.appendChild(img(e.thumbnail.url, "mc-embed-thumb"));
+        box.appendChild(top);
+        if (e.author && e.author.name) {
+            let a = div("mc-embed-author");
+            if (e.author.icon_url) a.appendChild(img(e.author.icon_url, "mc-embed-author-icon"));
+            a.appendChild(span(e.author.name));
+            main.appendChild(a);
+        }
+        if (e.title) main.appendChild(div("mc-embed-title", e.title)); // titles render no markdown on Discord
+        if (e.description) { let d = div("mc-embed-desc"); d.appendChild(renderMarkdown(e.description)); main.appendChild(d); }
+        if (e.fields && e.fields.length) {
+            let grid = div("mc-embed-fields");
+            e.fields.forEach(function (f) {
+                let fd = div("mc-embed-field" + (f.inline ? " mc-inline" : ""));
+                let fn = div("mc-embed-field-name"); fn.appendChild(renderInlineMarkdown(f.name || ""));
+                let fv = div("mc-embed-field-value"); fv.appendChild(renderMarkdown(f.value || ""));
+                fd.appendChild(fn); fd.appendChild(fv); grid.appendChild(fd);
+            });
+            main.appendChild(grid);
+        }
+        if (e.image && e.image.url) box.appendChild(img(e.image.url, "mc-embed-image"));
+        if (e.footer && (e.footer.text || e.timestamp)) {
+            let f = div("mc-embed-footer");
+            if (e.footer.icon_url) f.appendChild(img(e.footer.icon_url, "mc-embed-footer-icon"));
+            let ftext = e.footer.text || "";
+            if (e.timestamp) ftext += (ftext ? " • " : "") + new Date(e.timestamp).toLocaleString();
+            f.appendChild(span(ftext));
+            box.appendChild(f);
+        }
+        return box;
+    }
+
+
+    function loadMessage() {
+        let link = document.getElementById("mc-edit-link").value.trim();
+        let errEl = document.getElementById("mc-load-error");
+        errEl.className = "text-small mt-1 text-danger";
+        errEl.textContent = "";
+        if (!link) { errEl.textContent = "Paste a message link first."; return; }
+
+        fetch(base() + "/load?link=" + encodeURIComponent(link), { credentials: "same-origin" })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+            .then(function (res) {
+                if (!res.ok || res.body.error) { errEl.textContent = res.body.error || "Failed to load message."; return; }
+                populateFromMessage(res.body);
+                if (!res.body.author_is_bot) {
+                    errEl.className = "text-small mt-1 text-danger";
+                    errEl.textContent = "This message was not sent by YAGPDB, so it can't be edited (switch to Create to send it as a new message).";
+                    loadedForEdit = false; els.submit.disabled = true; show(els.editHint, true);
+                } else {
+                    loadedForEdit = true; els.submit.disabled = false; show(els.editHint, false);
+                }
+            })
+            .catch(function (e) { errEl.textContent = "Failed to load message: " + e.message; });
+    }
+
+    function populateFromMessage(resp) {
+        let payload = resp.payload || {};
+        let mode = resp.mode === "componentsv2" ? "componentsv2" : "normal";
+        state.components = (payload.components && payload.components.length) ? payload.components : [];
+        adaptLoadedComponents(state.components);
+        setMode(mode);
+
+        if (mode === "normal") {
+            setVal("embed-content", payload.content || "");
+            state.embeds = (payload.embeds || []).map(function (e) {
+                return {
+                    title: e.title || "", url: e.url || "", description: e.description || "",
+                    color: typeof e.color === "number" ? e.color : undefined,
+                    authorName: (e.author && e.author.name) || "", authorIcon: (e.author && e.author.icon_url) || "",
+                    footerText: (e.footer && e.footer.text) || "", footerIcon: (e.footer && e.footer.icon_url) || "",
+                    imageUrl: (e.image && e.image.url) || "", thumbUrl: (e.thumbnail && e.thumbnail.url) || "",
+                    ts: !!e.timestamp,
+                    fields: (e.fields || []).map(function (f) { return { name: f.name || "", value: f.value || "", inline: !!f.inline }; })
+                };
+            });
+        } else {
+            state.embeds = [];
+        }
+
+        if (currentAction === "edit") setTypeLock(mode);
+        renderEmbeds();
+        rebuildEditor();
+    }
+
+
+    // switchField builds the dashboard's standard on/off switch with its label.
+    let switchCount = 0;
+    function switchField(labelText, checked, onchange, cls, compact) {
+        let id = "mc-switch-" + (switchCount++);
+        let input = el("input", { type: "checkbox", class: "tgl tgl-flat" + (compact ? " tgl-sm" : ""), id: id });
+        input.checked = checked;
+        input.addEventListener("change", function () { onchange(input.checked); });
+        return el("div", { class: "d-flex align-items-center " + (cls || "") }, [
+            input,
+            el("label", { class: "tgl-btn mb-0", for: id }),
+            el("label", { class: "mb-0 ml-2", for: id }, [labelText])
+        ]);
+    }
+
+    function el(tag, attrs, children) {
+        let e = document.createElement(tag);
+        if (attrs) Object.keys(attrs).forEach(function (k) {
+            if (k === "class") e.className = attrs[k];
+            else e.setAttribute(k, attrs[k]);
+        });
+        (children || []).forEach(function (c) {
+            if (c == null) return;
+            e.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+        });
+        return e;
+    }
+
+    function btn(html, cls, onclick, opts) {
+        opts = opts || {};
+        let b = document.createElement("button");
+        b.type = "button"; b.className = "btn " + cls; b.innerHTML = html;
+        if (opts.noconfirm) b.setAttribute("noconfirm", "true");
+        if (opts.title) b.title = opts.title;
+        b.addEventListener("click", onclick);
+        return b;
+    }
+
+    function removeBtn(title, onclick) {
+        let b = btn('<i class="fas fa-times"></i>', "btn-sm btn-outline-danger mc-remove", onclick, { noconfirm: true, title: title });
+        b.setAttribute("aria-label", title);
+        return b;
+    }
+
+    function field(labelText, value, oninput, opts) {
+        opts = opts || {};
+        let input = document.createElement(opts.textarea ? "textarea" : "input");
+        input.className = "form-control form-control-sm";
+        if (opts.textarea) input.rows = opts.rows || 2;
+        if (opts.placeholder) input.placeholder = opts.placeholder;
+        if (opts.maxlength) input.maxLength = opts.maxlength;
+        input.value = value == null ? "" : value;
+        input.addEventListener("input", function () { oninput(input.value); });
+        let control = input;
+        if (opts.emojiPicker && window.YAGEmojiPicker) {
+            input.setAttribute("data-emoji-picker", opts.emojiPicker);
+            control = el("div", {}, [input]);
+            YAGEmojiPicker.enhance(control);
+        }
+        let children = [el("label", { class: "small mb-1" }, [labelText]), control];
+        if (opts.help) children.push(el("small", { class: "form-text text-muted" }, [opts.help]));
+        return el("div", { class: "form-group mb-2" }, children);
+    }
+
+    function parseEmoji(text) { return window.YAGEmojiPicker ? YAGEmojiPicker.parse(text) : (text ? { name: text } : null); }
+    function formatEmoji(emoji) {
+        if (!emoji) return "";
+        return window.YAGEmojiPicker ? YAGEmojiPicker.format(emoji) : (emoji.name || "");
+    }
+
+    function optionEmojiButton(opt) {
+        let b = btn("", "btn-sm btn-outline-primary mc-opt-emoji", function () {
+            if (!window.YAGEmojiPicker) return;
+            YAGEmojiPicker.open(b, function (emoji) { opt.emoji = emoji; rebuildEditor(); });
+        }, { noconfirm: true, title: "Option emoji" });
+        b.setAttribute("aria-label", opt.emoji ? "Change option emoji" : "Pick option emoji");
+        if (opt.emoji && (opt.emoji.id || opt.emoji.name)) {
+            b.appendChild(emojiNode(opt.emoji));
+            b.addEventListener("contextmenu", function (e) { e.preventDefault(); delete opt.emoji; rebuildEditor(); });
+            b.title = "Option emoji (right click to remove)";
+        } else {
+            b.innerHTML = '<i class="far fa-smile" aria-hidden="true"></i>';
+        }
+        return b;
+    }
+
+    function readonlyField(labelText, value, help) {
+        let input = el("input", { class: "form-control form-control-sm" }); input.value = value || ""; input.disabled = true;
+        let children = [el("label", { class: "small mb-1" }, [labelText]), input];
+        if (help) children.push(el("small", { class: "form-text text-muted" }, [help]));
+        return el("div", { class: "form-group mb-2" }, children);
+    }
+
+    // The editable custom_id field holds the bare suffix; the "templates-" prefix is added on build.
+    // Components loaded without that prefix are "locked" - shown read-only so their id is preserved.
+    function customIdField(node) {
+        if (node._locked) {
+            return readonlyField("Custom ID (fixed)", node.custom_id,
+                "This component wasn't created with the templates- prefix, so its id can't be changed.");
+        }
+        return field("Custom ID (optional)", node.custom_id, function (v) { node.custom_id = v; refreshPreview(); },
+            { placeholder: "auto-generated", maxlength: MAX_SUFFIX, help: '"templates-" is added automatically so it can trigger a custom command.' });
+    }
+
+    function inlineInput(placeholder, value, oninput) {
+        let i = document.createElement("input");
+        i.className = "form-control form-control-sm"; i.placeholder = placeholder;
+        i.value = value == null ? "" : value;
+        i.addEventListener("input", function () { oninput(i.value); });
+        return i;
+    }
+
+    function numField(labelText, value, oninput) {
+        let i = document.createElement("input");
+        i.type = "number"; i.className = "form-control form-control-sm"; i.min = 0;
+        i.value = value == null ? "" : value;
+        i.addEventListener("input", function () { oninput(i.value === "" ? null : parseInt(i.value)); });
+        return el("div", { class: "form-group mb-2" }, [el("label", { class: "small mb-1" }, [labelText]), i]);
+    }
+
+    function selectField(labelText, options, value, onchange) {
+        let sel = document.createElement("select");
+        sel.className = "form-control form-control-sm";
+        options.forEach(function (o) {
+            let op = document.createElement("option");
+            op.value = String(o.v); op.textContent = o.t;
+            if (String(o.v) === String(value)) op.selected = true;
+            sel.appendChild(op);
+        });
+        sel.addEventListener("change", function () { onchange(sel.value); });
+        return el("div", { class: "form-group mb-2" }, [el("label", { class: "small mb-1" }, [labelText]), sel]);
+    }
+
+    function show(elm, on) { if (elm) elm.style.display = on ? "" : "none"; }
+    function setVal(id, v) { let e = document.getElementById(id); if (e) e.value = v; }
+    function setChecked(id, v) { let e = document.getElementById(id); if (e) e.checked = !!v; }
+    function hexToInt(hex) { return hex ? (parseInt(hex.replace("#", ""), 16) || 0) : 0; }
+    function intToHex(i) { let s = (i & 0xffffff).toString(16); while (s.length < 6) s = "0" + s; return "#" + s; }
+
+    function div(cls, text) { let d = document.createElement("div"); if (cls) d.className = cls; if (text != null) d.textContent = text; return d; }
+    function span(text) { let s = document.createElement("span"); s.textContent = text; return s; }
+    function img(url, cls) {
+        let i = document.createElement("img");
+        i.src = url; if (cls) i.className = cls;
+        i.onerror = function () { i.style.display = "none"; };
+        return i;
+    }
+
+    init();
+})();

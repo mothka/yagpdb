@@ -15,12 +15,11 @@ var Command = &commands.YAGCommand{
 	HideFromCommandsPage: true,
 	Name:                 "createinvite",
 	Description:          "Maintenance command, creates an invite for the specified server. Bot Admin Only",
-	HideFromHelp:         true,
 	RequiredArgs:         1,
 	Arguments: []*dcmd.ArgDef{
 		{Name: "server", Type: dcmd.BigInt},
 	},
-	RunFunc: util.RequireBotAdmin(func(data *dcmd.Data) (interface{}, error) {
+	RunFunc: util.RequireBotAdmin(func(data *dcmd.Data) (any, error) {
 		channels, err := common.BotSession.GuildChannels(data.Args[0].Int64())
 		if err != nil {
 			return nil, err

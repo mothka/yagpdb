@@ -72,11 +72,14 @@ func InitCommands() {
 
 		ResponseSender: &dcmd.StdResponseSender{LogErrors: true},
 		Prefix:         &Plugin{},
+
+		DisablePrefixTrigger: common.PrefixCommandsDisabled(),
 	}
 
 	// We have our own middleware before the argument parsing, this is to check for things such as whether or not the command is enabled at all
-	CommandSystem.Root.AddMidlewares(YAGCommandMiddleware)
+	CommandSystem.Root.AddMiddlewares(YAGCommandMiddleware)
 	CommandSystem.Root.AddCommand(cmdHelp, cmdHelp.GetTrigger())
+
 	CommandSystem.Root.AddCommand(cmdPrefix, cmdPrefix.GetTrigger())
 
 	for _, v := range common.Plugins {
@@ -84,6 +87,10 @@ func InitCommands() {
 			adder.AddCommands()
 		}
 	}
+
+	// Needs every command registered, including the root level aliases kept for
+	// commands that moved into a container.
+	BuildOverrideNameAliases()
 }
 
 var _ featureflags.PluginWithFeatureFlags = (*Plugin)(nil)

@@ -114,13 +114,16 @@ type ApplicationCommandOption struct {
 	MinValue *float64 `json:"min_value,omitempty"`
 	// Maximum value of number/integer option.
 	MaxValue float64 `json:"max_value,omitempty"`
+	// Minimum and maximum allowed length for string options.
+	MinLength *int `json:"min_length,omitempty"`
+	MaxLength *int `json:"max_length,omitempty"`
 }
 
 // ApplicationCommandOptionChoice represents a slash command option choice.
 type ApplicationCommandOptionChoice struct {
 	Name              string            `json:"name"`
 	NameLocalizations map[Locale]string `json:"name_localizations,omitempty"`
-	Value             interface{}       `json:"value"`
+	Value             any               `json:"value"`
 }
 
 // ApplicationCommandPermissions represents a single user or role permission for a command.
@@ -186,6 +189,12 @@ type Interaction struct {
 	Data          InteractionData `json:"data"`
 	GuildID       int64           `json:"guild_id,string"`
 	ChannelID     int64           `json:"channel_id,string"`
+
+	// The partial channel the interaction was used in, sent even when the bot cannot view it.
+	Channel *Channel `json:"channel"`
+
+	// The bot's permissions in the channel the interaction was used in.
+	AppPermissions int64 `json:"app_permissions,string"`
 
 	// The message on which interaction was used.
 	// NOTE: this field is only filled when a button click triggered the interaction. Otherwise it will be nil.
@@ -297,9 +306,15 @@ type InteractionData interface {
 
 // ApplicationCommandInteractionData contains the data of application command interaction.
 type ApplicationCommandInteractionData struct {
-	ID       int64                                      `json:"id,string"`
-	Name     string                                     `json:"name"`
-	Resolved *ApplicationCommandInteractionDataResolved `json:"resolved"`
+	ID          int64                                      `json:"id,string"`
+	Name        string                                     `json:"name"`
+	CommandType ApplicationCommandType                     `json:"type"`
+	Resolved    *ApplicationCommandInteractionDataResolved `json:"resolved"`
+
+	// GuildID is the id of the guild the invoked command is registered to. It is only
+	// set for guild-scoped commands and omitted (0) for global commands, so it can be
+	// used to tell whether the interaction is for a guild command or a global one.
+	GuildID int64 `json:"guild_id,string"`
 
 	// Slash command options
 	Options []*ApplicationCommandInteractionDataOption `json:"options"`
@@ -350,6 +365,27 @@ func (ModalSubmitInteractionData) Type() InteractionType {
 	return InteractionModalSubmit
 }
 
+// TextInputValue returns the submitted value of the text input with the custom id, in either a label or a legacy action row.
+func (d ModalSubmitInteractionData) TextInputValue(customID string) (string, bool) {
+	for _, component := range d.Components {
+		var inputs []InteractiveComponent
+		switch c := component.(type) {
+		case *Label:
+			inputs = []InteractiveComponent{c.Component}
+		case *ActionsRow:
+			inputs = c.Components
+		}
+
+		for _, input := range inputs {
+			if textInput, ok := input.(*TextInput); ok && textInput.CustomID == customID {
+				return textInput.Value, true
+			}
+		}
+	}
+
+	return "", false
+}
+
 // UnmarshalJSON is a helper function to correctly unmarshal Components.
 func (d *ModalSubmitInteractionData) UnmarshalJSON(data []byte) error {
 	type modalSubmitInteractionData ModalSubmitInteractionData
@@ -380,7 +416,7 @@ type ApplicationCommandInteractionDataOption struct {
 	Name string                       `json:"name"`
 	Type ApplicationCommandOptionType `json:"type"`
 	// NOTE: Contains the value specified by Type.
-	Value   interface{}                                `json:"value,omitempty"`
+	Value   any                                        `json:"value,omitempty"`
 	Options []*ApplicationCommandInteractionDataOption `json:"options,omitempty"`
 
 	// NOTE: autocomplete interaction only.
@@ -533,6 +569,7 @@ type InteractionResponseData struct {
 	Embeds          []*MessageEmbed     `json:"embeds"`
 	AllowedMentions *AllowedMentions    `json:"allowed_mentions,omitempty"`
 	Flags           MessageFlags        `json:"flags,omitempty"`
+	File            *File               `json:"-"`
 	Files           []*File             `json:"-"`
 
 	// NOTE: autocomplete interaction only.

@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
+	"maps"
+	"os"
+
 	"math/rand"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,7 +105,7 @@ func HandleServerHome(w http.ResponseWriter, r *http.Request) (TemplateData, err
 	return templateData, nil
 }
 
-func HandleCPLogs(w http.ResponseWriter, r *http.Request) interface{} {
+func HandleCPLogs(w http.ResponseWriter, r *http.Request) any {
 	activeGuild, templateData := GetBaseCPContextData(r.Context())
 
 	logs, err := cplogs.GetEntries(activeGuild.ID, 100, 0)
@@ -113,31 +117,118 @@ func HandleCPLogs(w http.ResponseWriter, r *http.Request) interface{} {
 	return templateData
 }
 
-func HandleSelectServer(w http.ResponseWriter, r *http.Request) interface{} {
-	_, tmpl := GetCreateTemplateData(r.Context())
-
-	joinedGuildParsed, _ := strconv.ParseInt(r.FormValue("guild_id"), 10, 64)
-	if joinedGuildParsed != 0 {
-		guild, err := common.BotSession.Guild(joinedGuildParsed)
-		if err != nil {
-			CtxLogger(r.Context()).WithError(err).WithField("guild", r.FormValue("guild_id")).Error("Failed fetching guild")
-		} else {
-			tmpl["JoinedGuild"] = guild
+// SendAddedServerToSetup takes someone who just added the bot, which Discord
+// sends back here with the server's id, to its Quick Setup. Servers that were
+// set up before are passed on to their home page from there.
+func SendAddedServerToSetup(inner http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		guildID, _ := strconv.ParseInt(r.FormValue("guild_id"), 10, 64)
+		if guildID == 0 {
+			inner.ServeHTTP(w, r)
+			return
 		}
+
+		setupPath := "/manage/" + discordgo.StrID(guildID) + "/setup?from=invite"
+		if r.Context().Value(common.ContextKeyUser) == nil {
+			setupPath = "/login?goto=" + url.QueryEscape(setupPath)
+		}
+
+		http.Redirect(w, r, setupPath, http.StatusSeeOther)
+	})
+}
+
+type selectableGuild struct {
+	*common.GuildWithConnected
+	InviteURL string
+}
+
+func HandleSelectServer(w http.ResponseWriter, r *http.Request) any {
+	ctx := r.Context()
+	_, tmpl := GetCreateTemplateData(ctx)
+
+	if posts := discordblog.GetNewestPosts(1); len(posts) > 0 {
+		tmpl["LatestPost"] = &newsPost{Post: posts[0], Summary: postSummary(posts[0].Message.Content)}
 	}
 
+	if ctx.Value(common.ContextKeyUser) == nil {
+		return tmpl
+	}
+
+	guilds, err := GetUserAccessibleGuilds(ctx, false)
+	if err != nil {
+		CtxLogger(ctx).WithError(err).Error("Failed retrieving the user's servers")
+		tmpl["GuildsFailed"] = true
+		return tmpl
+	}
+
+	redirect := url.QueryEscape(BaseURL() + "/manage")
+	var connected, invitable []*selectableGuild
+	for _, g := range guilds {
+		if g.Connected {
+			connected = append(connected, &selectableGuild{GuildWithConnected: g})
+			continue
+		}
+
+		invitable = append(invitable, &selectableGuild{
+			GuildWithConnected: g,
+			InviteURL:          BotInviteURL(g.ID) + "&response_type=code&redirect_uri=" + redirect,
+		})
+	}
+
+	tmpl["ConnectedGuilds"] = connected
+	tmpl["InvitableGuilds"] = invitable
+	return tmpl
+}
+
+type newsPost struct {
+	*discordblog.Post
+	Summary string
+}
+
+const shownPatrons = 18
+
+func HandleNews(w http.ResponseWriter, r *http.Request) any {
+	_, tmpl := GetCreateTemplateData(r.Context())
+
 	if patreon.ActivePoller != nil {
-		patrons := patreon.ActivePoller.GetPatrons()
+		var patrons []*patreon.Patron
+		for _, p := range patreon.ActivePoller.GetPatrons() {
+			if p.AmountCents >= 1000 {
+				patrons = append(patrons, p)
+			}
+		}
+
 		if len(patrons) > 0 {
 			tmpl["patreonActive"] = true
-			tmpl["activePatrons"] = patrons
+			tmpl["MorePatrons"] = max(len(patrons)-shownPatrons, 0)
+			tmpl["activePatrons"] = patrons[:min(len(patrons), shownPatrons)]
 		}
 	}
 
 	posts := discordblog.GetNewestPosts(10)
-	tmpl["Posts"] = posts
+	news := make([]*newsPost, len(posts))
+	for i, p := range posts {
+		news[i] = &newsPost{Post: p, Summary: postSummary(p.Message.Content)}
+	}
+	tmpl["Posts"] = news
 
 	return tmpl
+}
+
+func postSummary(content string) string {
+	for line := range strings.Lines(content) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		if runes := []rune(line); len(runes) > 120 {
+			return string(runes[:120]) + "..."
+		}
+		return line
+	}
+
+	return ""
 }
 
 func HandleLandingPage(w http.ResponseWriter, r *http.Request) (TemplateData, error) {
@@ -281,7 +372,7 @@ func HandleStatusHTML(w http.ResponseWriter, r *http.Request) (TemplateData, err
 }
 
 // HandleStatusJSON handles GET /status.json
-func HandleStatusJSON(w http.ResponseWriter, r *http.Request) interface{} {
+func HandleStatusJSON(w http.ResponseWriter, r *http.Request) any {
 	status, err := getFullBotStatus()
 	if err != nil {
 		return err
@@ -295,11 +386,16 @@ type GuildStatus struct {
 }
 
 // HandleGuildStatusJSON handles GET /api/:server/status.json
-func HandleGuildStatusJSON(w http.ResponseWriter, r *http.Request) interface{} {
+func HandleGuildStatusJSON(w http.ResponseWriter, r *http.Request) any {
 	g := r.Context().Value(common.ContextKeyCurrentGuild).(*dstate.GuildSet)
 	status, err := getFullBotStatus()
 	if err != nil {
 		return err
+	}
+
+	// No shard count is known until a bot node reports in.
+	if status.TotalShards < 1 {
+		return GuildStatus{ShardOnline: false}
 	}
 
 	shard := int(g.ID>>22) % status.TotalShards
@@ -319,11 +415,11 @@ type HostStatus struct {
 func genFakeNodeStatuses(hosts int, nodes int, shards int) []*HostStatus {
 	result := make([]*HostStatus, 0, hosts)
 
-	for hostI := 0; hostI < hosts; hostI++ {
+	for hostI := range hosts {
 		host := &HostStatus{
 			Name: "yagpdb-" + strconv.Itoa(hostI),
 		}
-		for nodeI := 0; nodeI < nodes; nodeI++ {
+		for nodeI := range nodes {
 
 			nodeID := (hostI * nodes) + nodeI
 
@@ -331,7 +427,7 @@ func genFakeNodeStatuses(hosts int, nodes int, shards int) []*HostStatus {
 				ID: strconv.Itoa(nodeID),
 			}
 
-			for shardI := 0; shardI < shards; shardI++ {
+			for shardI := range shards {
 				shard := &botrest.ShardStatus{
 					ShardID:         (nodeID * shards) + shardI,
 					TotalEvents:     999999,
@@ -388,7 +484,7 @@ func HandleReconnectShard(w http.ResponseWriter, r *http.Request) (TemplateData,
 	return HandleStatusHTML(w, r)
 }
 
-func HandleChannelPermissions(w http.ResponseWriter, r *http.Request) interface{} {
+func HandleChannelPermissions(w http.ResponseWriter, r *http.Request) any {
 	g := r.Context().Value(common.ContextKeyCurrentGuild).(*dstate.GuildSet)
 	c, _ := strconv.ParseInt(pat.Param(r, "channel"), 10, 64)
 	perms, err := botrest.GetChannelPermissions(g.ID, c)
@@ -430,7 +526,7 @@ func handleAdsTXT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := ioutil.ReadFile(ConfAdsTxt.GetString())
+	f, err := os.ReadFile(ConfAdsTxt.GetString())
 	if err != nil {
 		logger.WithError(err).Error("failed reading ads.txt file")
 		return
@@ -610,9 +706,7 @@ func GuildScopeCacheMW(plugin common.Plugin, inner http.Handler) http.Handler {
 		if v, ok := WidgetCache.Get(cacheKey); ok {
 			// already in the cache
 			cast := v.(*WidgetCacheItem)
-			for headerKey, headerValue := range cast.Header {
-				w.Header()[headerKey] = headerValue
-			}
+			maps.Copy(w.Header(), cast.Header)
 			w.WriteHeader(200)
 			w.Write(cast.RawResponse)
 			// CtxLogger(r.Context()).Info("cache hit")
