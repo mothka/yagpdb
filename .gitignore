@@ -24,5 +24,6 @@ cmd/shardorchestrator/shardorchestrator
 cmd/shardorchestrator/capturepanics
 __debug_bin*
 app.env
+config.env
 .scannerwork
-google-creds.json
+google-creds.jsonapp.env
