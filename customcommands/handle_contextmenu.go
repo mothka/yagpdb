@@ -21,7 +21,7 @@ var cachedCommandsContextMenuTrigger = common.CacheSet.RegisterSlot("custom_comm
 // BotCachedGetCommandsWithContextMenuTrigger returns the (cached) context menu custom
 // commands (both user and message type) for a guild.
 func BotCachedGetCommandsWithContextMenuTrigger(guildID int64, ctx context.Context) ([]*models.CustomCommand, error) {
-	v, err := cachedCommandsContextMenuTrigger.GetCustomFetch(guildID, func(key interface{}) (interface{}, error) {
+	v, err := cachedCommandsContextMenuTrigger.GetCustomFetch(guildID, func(key any) (any, error) {
 		var cmds []*models.CustomCommand
 		var err error
 		common.LogLongCallTime(time.Second, true, "Took longer than a second to fetch custom commands from db", logrus.Fields{"guild": guildID}, func() {
@@ -108,7 +108,7 @@ func handleContextMenuInteraction(evt *eventsystem.EventData, cs *dstate.Channel
 // ExecuteCustomCommandFromContextMenu builds the template context for a context menu
 // custom command and executes it. The template sees:
 //
-//	.TargetUser    the target's User object — the clicked user for user commands, or the
+//	.TargetUser    the target's User object - the clicked user for user commands, or the
 //	               author of the clicked message for message commands
 //	.TargetMember  the matching MemberState for that same target
 //	.Author        the User object of the person who invoked the command
@@ -116,7 +116,7 @@ func handleContextMenuInteraction(evt *eventsystem.EventData, cs *dstate.Channel
 //	.CommandType   "user" or "message"
 //
 // A nil member is passed to NewContext so .User/.Member are not exposed and sendDM (which
-// targets the context member) is disabled — a context menu command must not be usable to
+// targets the context member) is disabled - a context menu command must not be usable to
 // DM an arbitrary target. This mirrors role trigger commands.
 func ExecuteCustomCommandFromContextMenu(cc *models.CustomCommand, gs *dstate.GuildSet, cs *dstate.ChannelState, interaction *templates.CustomCommandInteraction) error {
 	ms := dstate.MemberStateFromMember(interaction.Member)

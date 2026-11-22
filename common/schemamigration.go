@@ -10,6 +10,7 @@ import (
 var (
 	createTableRegex          = regexp.MustCompile(`(?i)create table if not exists ([0-9a-z_]*) *\(`)
 	alterTableAddColumnRegex  = regexp.MustCompile(`(?i)alter table ([0-9a-z_]*) add column if not exists "?([0-9a-z_]*)"?`)
+	alterTableDropColumnRegex = regexp.MustCompile(`(?i)^alter table ([0-9a-z_]*) drop column if exists "?([0-9a-z_]*)"?;?$`)
 	addIndexRegex             = regexp.MustCompile(`(?i)create (unique )?index if not exists ([0-9a-z_]*) on ([0-9a-z_]*)`)
 	addNotNullConstraintRegex = regexp.MustCompile(`(?i)alter table ([0-9a-z_]*) alter column "?([0-9a-z_]*)"? set not null`)
 )
@@ -31,9 +32,9 @@ func initQueuedSchemas() {
 	}
 }
 
-func initSchema(schema string, name string) {
+func initSchema(schema string, name string) error {
 	if confNoSchemaInit.GetBool() {
-		return
+		return nil
 	}
 
 	skip, err := checkSkipSchemaInit(schema)
@@ -42,16 +43,13 @@ func initSchema(schema string, name string) {
 	}
 
 	if skip {
-		return
+		return nil
 	}
 
 	logger.Info("Schema initialization: ", name, ": not skipped")
 
 	_, err = PQ.Exec(schema)
-	if err != nil {
-		UnlockRedisKey("schema_init")
-		logger.WithError(err).Fatal("failed initializing postgres db schema for ", name)
-	}
+	return err
 }
 
 func checkSkipSchemaInit(schema string) (exists bool, err error) {
@@ -71,6 +69,14 @@ func checkSkipSchemaInit(schema string) (exists bool, err error) {
 
 	if matches := addNotNullConstraintRegex.FindAllStringSubmatch(trimmed, -1); len(matches) > 0 {
 		return checkNotNullConstraintExists(matches[0][1], matches[0][2])
+	}
+
+	if matches := alterTableDropColumnRegex.FindStringSubmatch(trimmed); matches != nil {
+		exists, err := checkColumnExists(matches[1], matches[2])
+		if err != nil {
+			return false, err
+		}
+		return !exists, nil
 	}
 
 	return false, nil
@@ -141,14 +147,24 @@ WHERE table_name=$1 AND column_name=$2;
 }
 
 func InitSchemas(name string, schemas ...string) {
-	if err := BlockingLockRedisKey("schema_init", time.Minute*10, 60*60); err != nil {
+	if RunningDocGen {
+		return
+	}
+
+	// Leased so that a node killed mid migration does not keep others from starting.
+	lock, err := BlockingLeasedLockRedisKey("schema_init", time.Minute*10, time.Second*30)
+	if err != nil {
 		panic(err)
 	}
 
-	defer UnlockRedisKey("schema_init")
+	defer lock.Unlock()
 
 	for i, v := range schemas {
 		actualName := fmt.Sprintf("%s[%d]", name, i)
-		initSchema(v, actualName)
+		if err := initSchema(v, actualName); err != nil {
+			// Fatal exits without running defers.
+			lock.Unlock()
+			logger.WithError(err).Fatal("failed initializing postgres db schema for ", actualName)
+		}
 	}
 }

@@ -7,12 +7,14 @@ import (
 )
 
 var Command = &commands.YAGCommand{
-	CmdCategory: commands.CategoryGeneral,
-	Name:        "Invite",
-	Description: "Responds with bot invite link",
-	RunInDM:     true,
+	CmdCategory:         commands.CategoryGeneral,
+	Name:                "Invite",
+	Description:         "Responds with bot invite link",
+	SlashCommandEnabled: true,
+	DefaultEnabled:      true,
+	RunInDM:             true,
 
-	RunFunc: func(data *dcmd.Data) (interface{}, error) {
+	RunFunc: func(data *dcmd.Data) (any, error) {
 		return "Please add the bot through the website\nhttps://" + common.ConfHost.GetString(), nil
 	},
 }

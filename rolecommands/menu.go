@@ -56,7 +56,7 @@ func roleGroupAutocomplete(parsed *dcmd.Data, arg *dcmd.ParsedArg) ([]*discordgo
 	return choices, nil
 }
 
-func cmdFuncRoleMenuCreate(parsed *dcmd.Data) (interface{}, error) {
+func cmdFuncRoleMenuCreate(parsed *dcmd.Data) (any, error) {
 	name := parsed.Args[0].Str()
 	panelURL := fmt.Sprintf("%s/rolecommands/", web.ManageServerURL(parsed.GuildData.GS.ID))
 	group, err := models.RoleGroups(qm.Where("guild_id=?", parsed.GuildData.GS.ID), qm.Where("name ILIKE ?", name), qm.Load("RoleCommands")).OneG(parsed.Context())
@@ -99,7 +99,7 @@ func cmdFuncRoleMenuCreate(parsed *dcmd.Data) (interface{}, error) {
 
 		RoleGroupID:   null.Int64From(group.ID),
 		OwnMessage:    true,
-		DisableSendDM: parsed.Switches["nodm"].Value != nil && parsed.Switches["nodm"].Value.(bool),
+		DisableSendDM: parsed.Switches["dm"].Value == nil || !parsed.Switches["dm"].Value.(bool),
 		// `rr` is `true` by default, which is why we want
 		// a `true` value, if `.Value` is `nil`.
 		RemoveRoleOnReactionRemove: parsed.Switches["rr"].Value == nil || !parsed.Switches["rr"].Value.(bool),
@@ -156,7 +156,7 @@ func cmdFuncRoleMenuCreate(parsed *dcmd.Data) (interface{}, error) {
 	return nil, err
 }
 
-func cmdFuncRoleMenuUpdate(parsed *dcmd.Data) (interface{}, error) {
+func cmdFuncRoleMenuUpdate(parsed *dcmd.Data) (any, error) {
 	mID := parsed.Args[0].Int64()
 	menu, err := FindRolemenuFull(parsed.Context(), mID, parsed.GuildData.GS.ID)
 	if err != nil {
@@ -166,7 +166,11 @@ func cmdFuncRoleMenuUpdate(parsed *dcmd.Data) (interface{}, error) {
 	return UpdateMenu(parsed, menu)
 }
 
-func UpdateMenu(parsed *dcmd.Data, menu *models.RoleMenu) (interface{}, error) {
+func UpdateMenu(parsed *dcmd.Data, menu *models.RoleMenu) (any, error) {
+	if isDropdownMenu(menu) {
+		return dropdownMenuDashboardHint(menu), nil
+	}
+
 	if menu.State == RoleMenuStateSettingUp {
 		return "Already setting this menu up, use `rolemenu complete ...` to complete the setup.", nil
 	}
@@ -259,7 +263,7 @@ OUTER:
 }
 
 func StrFlags(rm *models.RoleMenu) string {
-	nodmFlagHelp := fmt.Sprintf("`-nodm: %t` toggle with `rolemenu update -nodm %d`: disables dm messages.", rm.DisableSendDM, rm.MessageID)
+	nodmFlagHelp := fmt.Sprintf("`-nodm: %t` toggle with `rolemenu update -nodm %d`: disables dm messages, true by default.", rm.DisableSendDM, rm.MessageID)
 	rrFlagHelp := fmt.Sprintf("`-rr: %t` toggle with `rolemenu update -rr %d`: removing reactions removes the role.", rm.RemoveRoleOnReactionRemove, rm.MessageID)
 	return nodmFlagHelp + "\n" + rrFlagHelp
 }
@@ -481,7 +485,7 @@ func handleReactionAddRemove(evt *eventsystem.EventData) {
 		return
 	}
 
-	if menu == nil {
+	if menu == nil || isDropdownMenu(menu) {
 		return
 	}
 
@@ -539,7 +543,7 @@ func handleReactionAddRemove(evt *eventsystem.EventData) {
 					},
 				},
 			},
-			Components: bot.GenerateServerInfoButton(gs.ID),
+			Components: bot.DMComponents(gs.ID, nil, 0),
 		}
 		bot.SendDMComplexMessage(uID, msgSend)
 	}
@@ -746,11 +750,14 @@ func FindRolemenuFull(ctx context.Context, mID int64, guildID int64) (*models.Ro
 	return models.RoleMenus(qm.Where("guild_id = ? AND (message_id = ? OR setup_msg_id = ?)", guildID, mID, mID), qm.Load("RoleMenuOptions.RoleCommand"), qm.Load("RoleGroup.RoleCommands")).OneG(ctx)
 }
 
-func cmdFuncRoleMenuResetReactions(data *dcmd.Data) (interface{}, error) {
+func cmdFuncRoleMenuResetReactions(data *dcmd.Data) (any, error) {
 	mID := data.Args[0].Int64()
 	menu, err := FindRolemenuFull(data.Context(), mID, data.GuildData.GS.ID)
 	if err != nil {
 		return "Couldn't find menu", nil
+	}
+	if isDropdownMenu(menu) {
+		return dropdownMenuDashboardHint(menu), nil
 	}
 
 	err = common.BotSession.MessageReactionsRemoveAll(menu.ChannelID, menu.MessageID)
@@ -775,7 +782,7 @@ func cmdFuncRoleMenuResetReactions(data *dcmd.Data) (interface{}, error) {
 	return "Done resetting rolemenu!", nil
 }
 
-func cmdFuncRoleMenuRemove(data *dcmd.Data) (interface{}, error) {
+func cmdFuncRoleMenuRemove(data *dcmd.Data) (any, error) {
 	mID := data.Args[0].Int64()
 	menu, err := FindRolemenuFull(data.Context(), mID, data.GuildData.GS.ID)
 	if err != nil {
@@ -791,11 +798,15 @@ func cmdFuncRoleMenuRemove(data *dcmd.Data) (interface{}, error) {
 	return "Deleted. The bot will no longer listen for reactions on this message, you can even make another menu on it.", nil
 }
 
-func cmdFuncRoleMenuEditOption(data *dcmd.Data) (interface{}, error) {
+func cmdFuncRoleMenuEditOption(data *dcmd.Data) (any, error) {
 	mID := data.Args[0].Int64()
 	menu, err := FindRolemenuFull(data.Context(), mID, data.GuildData.GS.ID)
 	if err != nil {
 		return "Couldn't find menu", nil
+	}
+
+	if isDropdownMenu(menu) {
+		return dropdownMenuDashboardHint(menu), nil
 	}
 
 	if menu.State != RoleMenuStateDone {
@@ -816,7 +827,7 @@ func cmdFuncRoleMenuEditOption(data *dcmd.Data) (interface{}, error) {
 	return nil, nil
 }
 
-func cmdFuncRoleMenuComplete(data *dcmd.Data) (interface{}, error) {
+func cmdFuncRoleMenuComplete(data *dcmd.Data) (any, error) {
 	mID := data.Args[0].Int64()
 	menu, err := FindRolemenuFull(data.Context(), mID, data.GuildData.GS.ID)
 	if err != nil {
@@ -843,7 +854,7 @@ func cmdFuncRoleMenuComplete(data *dcmd.Data) (interface{}, error) {
 	return "Menu marked as done", nil
 }
 
-func cmdFuncRoleMenuListGroups(data *dcmd.Data) (interface{}, error) {
+func cmdFuncRoleMenuListGroups(data *dcmd.Data) (any, error) {
 	groups, err := models.RoleGroups(qm.Where("guild_id=?", data.GuildData.GS.ID), qm.Select("name")).AllG(data.Context())
 	if err != nil {
 		return err, err

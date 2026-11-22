@@ -12,13 +12,13 @@ import (
 
 var Command = &commands.YAGCommand{
 	CmdCategory: commands.CategoryDebug,
-	Name:        "CurrentShard",
-	Aliases:     []string{"cshard"},
+	Name:        "Shard",
+	Aliases:     []string{"cshard", "currentshard"},
 	Description: "Shows the current shard this server is on (or the one specified)",
 	Arguments: []*dcmd.ArgDef{
 		{Name: "serverid", Type: dcmd.BigInt, Default: int64(0)},
 	},
-	RunFunc: func(data *dcmd.Data) (interface{}, error) {
+	RunFunc: func(data *dcmd.Data) (any, error) {
 		gID := data.GuildData.GS.ID
 
 		if data.Args[0].Int64() != 0 {

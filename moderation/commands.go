@@ -173,7 +173,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
 		IsResponseEphemeral:      false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			if parsed.Context().Value(commands.CtxKeyExecutedByNestedCommandTemplate) == true {
 				return nil, errors.New("cannot nest exec/execAdmin calls")
 			}
@@ -232,7 +232,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
 		IsResponseEphemeral:      false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			config, _, err := MBaseCmd(parsed, 0) //No need to check member role hierarchy as banned members should not be in server
 			if err != nil {
 				return nil, err
@@ -283,7 +283,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		RequireBotPerms:     [][]int64{{discordgo.PermissionAdministrator}, {discordgo.PermissionKickMembers}},
 		SlashCommandEnabled: true,
 		IsResponseEphemeral: false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			if parsed.Context().Value(commands.CtxKeyExecutedByNestedCommandTemplate) == true {
 				return nil, errors.New("cannot nest exec/execAdmin calls")
 			}
@@ -347,7 +347,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
 		IsResponseEphemeral:      false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			if parsed.Context().Value(commands.CtxKeyExecutedByNestedCommandTemplate) == true {
 				return nil, errors.New("cannot nest exec/execAdmin calls")
 			}
@@ -415,7 +415,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
 		IsResponseEphemeral:      false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			if parsed.Context().Value(commands.CtxKeyExecutedByNestedCommandTemplate) == true {
 				return nil, errors.New("cannot nest exec/execAdmin calls")
 			}
@@ -474,7 +474,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
 		IsResponseEphemeral:      false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			if parsed.Context().Value(commands.CtxKeyExecutedByNestedCommandTemplate) == true {
 				return nil, errors.New("cannot nest exec/execAdmin calls")
 			}
@@ -536,7 +536,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
 		IsResponseEphemeral:      false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			config, target, err := MBaseCmd(parsed, parsed.Args[0].Int64())
 			if err != nil {
 				return nil, err
@@ -585,7 +585,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		SlashCommandEnabled: true,
 		DefaultEnabled:      false,
 		IsResponseEphemeral: true,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			config, _, err := MBaseCmd(parsed, 0)
 			if err != nil {
 				return nil, err
@@ -614,14 +614,14 @@ var ModerationCommands = []*commands.YAGCommand{
 				return "No report channel set up", nil
 			}
 
-			var topContent string
+			var topContent strings.Builder
 			if len(config.ReportMentionRoles) > 0 {
 				for _, r := range config.ReportMentionRoles {
-					topContent += fmt.Sprintf("<@&%d>", r)
+					topContent.WriteString(fmt.Sprintf("<@&%d>", r))
 				}
-				topContent += ":\n"
+				topContent.WriteString(":\n")
 			}
-			topContent += fmt.Sprintf("%s reported **%s (ID %d)**", parsed.Author.Mention(), target.String(), target.ID)
+			topContent.WriteString(fmt.Sprintf("%s reported **%s (ID %d)**", parsed.Author.Mention(), target.String(), target.ID))
 
 			embed := &discordgo.MessageEmbed{
 				Author: &discordgo.MessageEmbedAuthor{
@@ -636,7 +636,7 @@ var ModerationCommands = []*commands.YAGCommand{
 			}
 
 			send := &discordgo.MessageSend{
-				Content: topContent,
+				Content: topContent.String(),
 				Embeds:  []*discordgo.MessageEmbed{embed},
 				AllowedMentions: discordgo.AllowedMentions{
 					Parse: []discordgo.AllowedMentionType{discordgo.AllowedMentionTypeUsers, discordgo.AllowedMentionTypeRoles},
@@ -687,7 +687,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
 		IsResponseEphemeral:      false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			config, _, err := MBaseCmd(parsed, 0)
 			if err != nil {
 				return nil, err
@@ -822,7 +822,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		RequiredDiscordPermsHelp: "KickMembers or ManageGuild",
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			config, _, err := MBaseCmd(parsed, 0)
 			if err != nil {
 				return nil, err
@@ -874,7 +874,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
 		IsResponseEphemeral:      false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			if parsed.Context().Value(commands.CtxKeyExecutedByNestedCommandTemplate) == true {
 				return nil, errors.New("cannot nest exec/execAdmin calls")
 			}
@@ -906,12 +906,13 @@ var ModerationCommands = []*commands.YAGCommand{
 		},
 	},
 	{
-		CustomEnabled: true,
-		CmdCategory:   commands.CategoryModeration,
-		Name:          "Warnings",
-		Description:   "Lists warning of a user.",
-		Aliases:       []string{"Warns"},
-		RequiredArgs:  1,
+		CustomEnabled:       true,
+		CmdCategory:         commands.CategoryModeration,
+		Name:                "List",
+		Description:         "Lists warning of a user.",
+		Aliases:             []string{""},
+		LegacyOverrideNames: []string{"warnings", "warns"},
+		RequiredArgs:        1,
 		Arguments: []*dcmd.ArgDef{
 			{Name: "User", Type: dcmd.UserID, Default: 0},
 			{Name: "Page", Type: &dcmd.IntArg{Max: 10000}, Default: 0},
@@ -922,7 +923,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		RequiredDiscordPermsHelp: "ManageMessages or ManageGuild",
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			var err error
 			config, _, err := MBaseCmd(parsed, 0)
 			if err != nil {
@@ -954,10 +955,7 @@ var ModerationCommands = []*commands.YAGCommand{
 					Footer:      &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("By: %s (%13s)", warning.AuthorUsernameDiscrim, warning.AuthorID)},
 				}, nil
 			}
-			page := parsed.Args[1].Int()
-			if page < 1 {
-				page = 1
-			}
+			page := max(parsed.Args[1].Int(), 1)
 			if parsed.Context().Value(paginatedmessages.CtxKeyNoPagination) != nil {
 				return PaginateWarnings(parsed)(nil, page)
 			}
@@ -968,7 +966,7 @@ var ModerationCommands = []*commands.YAGCommand{
 	{
 		CustomEnabled: true,
 		CmdCategory:   commands.CategoryModeration,
-		Name:          "EditWarning",
+		Name:          "Edit",
 		Description:   "Edit a warning, id is the first number of each warning from the warnings command",
 		RequiredArgs:  2,
 		Arguments: []*dcmd.ArgDef{
@@ -978,7 +976,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		RequiredDiscordPermsHelp: "ManageMessages or ManageGuild",
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			config, _, err := MBaseCmd(parsed, 0)
 			if err != nil {
 				return nil, err
@@ -1009,8 +1007,7 @@ var ModerationCommands = []*commands.YAGCommand{
 	{
 		CustomEnabled: true,
 		CmdCategory:   commands.CategoryModeration,
-		Name:          "DelWarning",
-		Aliases:       []string{"dw", "delwarn", "deletewarning"},
+		Name:          "Delete",
 		Description:   "Deletes a warning, id is the first number of each warning from the warnings command",
 		RequiredArgs:  1,
 		Arguments: []*dcmd.ArgDef{
@@ -1020,7 +1017,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		RequiredDiscordPermsHelp: "ManageMessages or ManageGuild",
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			config, _, err := MBaseCmd(parsed, 0)
 			if err != nil {
 				return nil, err
@@ -1074,8 +1071,7 @@ var ModerationCommands = []*commands.YAGCommand{
 	{
 		CustomEnabled: true,
 		CmdCategory:   commands.CategoryModeration,
-		Name:          "ClearWarnings",
-		Aliases:       []string{"clw"},
+		Name:          "Clear",
 		Description:   "Clears the warnings of a user",
 		RequiredArgs:  1,
 		Arguments: []*dcmd.ArgDef{
@@ -1085,7 +1081,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		RequiredDiscordPermsHelp: "ManageMessages or ManageGuild",
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 
 			config, target, err := MBaseCmd(parsed, parsed.Args[0].Int64())
 			if err != nil {
@@ -1116,8 +1112,7 @@ var ModerationCommands = []*commands.YAGCommand{
 	},
 	{
 		CmdCategory: commands.CategoryModeration,
-		Name:        "TopWarnings",
-		Aliases:     []string{"topwarns"},
+		Name:        "Top",
 		Description: "Shows ranked list of warnings on the server",
 		Arguments: []*dcmd.ArgDef{
 			{Name: "Page", Type: dcmd.Int, Default: 0},
@@ -1160,16 +1155,17 @@ var ModerationCommands = []*commands.YAGCommand{
 				Title: "Ranked list of warnings",
 			}
 
-			out := "```\n# - Warns - User\n"
+			var out strings.Builder
+			out.WriteString("```\n# - Warns - User\n")
 			for _, v := range entries {
 				if !showUserIDs {
 					user := v.Username
 					if user == "" {
 						user = "unknown ID:" + strconv.FormatInt(v.UserID, 10)
 					}
-					out += fmt.Sprintf("#%02d: %4d - %s\n", v.Rank, v.WarnCount, user)
+					out.WriteString(fmt.Sprintf("#%02d: %4d - %s\n", v.Rank, v.WarnCount, user))
 				} else {
-					out += fmt.Sprintf("#%02d: %4d - %d\n", v.Rank, v.WarnCount, v.UserID)
+					out.WriteString(fmt.Sprintf("#%02d: %4d - %d\n", v.Rank, v.WarnCount, v.UserID))
 				}
 			}
 
@@ -1178,9 +1174,9 @@ var ModerationCommands = []*commands.YAGCommand{
 				return nil, err
 			}
 
-			out += "```\n" + fmt.Sprintf("Total Server Warnings: `%d`", count)
+			out.WriteString("```\n" + fmt.Sprintf("Total Server Warnings: `%d`", count))
 
-			embed.Description = out
+			embed.Description = out.String()
 
 			return embed, nil
 
@@ -1203,7 +1199,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		RequireBotPerms:          [][]int64{{discordgo.PermissionAdministrator}, {discordgo.PermissionManageGuild}, {discordgo.PermissionManageRoles}},
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			config, target, err := MBaseCmd(parsed, parsed.Args[0].Int64())
 			if err != nil {
 				return nil, err
@@ -1279,7 +1275,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		RequireBotPerms:          [][]int64{{discordgo.PermissionAdministrator}, {discordgo.PermissionManageGuild}, {discordgo.PermissionManageRoles}},
 		SlashCommandEnabled:      true,
 		DefaultEnabled:           false,
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
+		RunFunc: func(parsed *dcmd.Data) (any, error) {
 			config, target, err := MBaseCmd(parsed, parsed.Args[0].Int64())
 			if err != nil {
 				return nil, err

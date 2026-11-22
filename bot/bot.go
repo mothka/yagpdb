@@ -38,6 +38,7 @@ var (
 
 var (
 	confConnEventChannel         = config.RegisterOption("yagpdb.connevt.channel", "Gateway connection logging channel", 0)
+	confDMReportChannel          = config.RegisterOption("yagpdb.dm.report.channel", "Channel that DMs reported by users are forwarded to", 0)
 	confConnStatus               = config.RegisterOption("yagpdb.connstatus.channel", "Gateway connection status channel", 0)
 	confShardOrchestratorAddress = config.RegisterOption("yagpdb.orchestrator.address", "Sharding orchestrator address to connect to, if set it will be put into orchstration mode", "")
 
@@ -52,6 +53,7 @@ var (
 		discordgo.GatewayIntentGuildMembers,
 		discordgo.GatewayIntentGuildModeration,
 		discordgo.GatewayIntentGuildExpressions,
+		discordgo.GatewayIntentGuildInvites,
 		discordgo.GatewayIntentGuildVoiceStates,
 		discordgo.GatewayIntentGuildPresences,
 		discordgo.GatewayIntentGuildMessages,
@@ -246,7 +248,7 @@ func GuildCountsFunc() []int {
 	numShards := ShardManager.GetNumShards()
 	result := make([]int, numShards)
 
-	for i := 0; i < numShards; i++ {
+	for i := range numShards {
 		guilds := State.GetShardGuilds(int64(i))
 		result[i] = len(guilds)
 	}
@@ -399,7 +401,7 @@ func botServiceDetailsF() (details *common.BotServiceDetails, err error) {
 	if !UsingOrchestrator {
 		totalShards := ShardManager.GetNumShards()
 		shards := make([]int, totalShards)
-		for i := 0; i < totalShards; i++ {
+		for i := range totalShards {
 			shards[i] = i
 		}
 

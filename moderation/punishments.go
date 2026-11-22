@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +37,18 @@ const MaxTimeOutDuration = 40320 * time.Minute
 const MinTimeOutDuration = time.Minute
 const DefaultTimeoutDuration = 10 * time.Minute
 const DefaultDMMessage = "You have been {{.ModAction}}\n**Reason:** {{.Reason}}"
+
+const DefaultBanDMMessage = DefaultDMMessage + "{{if .AppealLink}}\n\nYou can appeal your ban on {{.AppealLink}}{{end}}"
+
+// withBanAppealLink adds the appeal link to a ban dm that does not show it
+// already, leaving a dm that renders empty unsent.
+func withBanAppealLink(executedDM, appealLink string) string {
+	if appealLink == "" || strings.TrimSpace(executedDM) == "" || strings.Contains(executedDM, appealLink) {
+		return executedDM
+	}
+
+	return executedDM + "\n\nYou can appeal your ban on " + appealLink
+}
 
 func getMemberWithFallback(gs *dstate.GuildSet, user *discordgo.User) (ms *dstate.MemberState, notFound bool) {
 	ms, err := bot.GetMember(gs.ID, user.ID)
@@ -201,52 +214,87 @@ var ActionMap = map[string]string{
 }
 
 func sendPunishDM(config *Config, dmMsg string, action ModlogAction, gs *dstate.GuildSet, channel *dstate.ChannelState, message *discordgo.Message, author *discordgo.User, member *dstate.MemberState, duration time.Duration, reason string, warningID int, executedFromCommandTemplate bool) {
+	// this often runs in its own goroutine, where a panic would take down the whole process
+	defer func() {
+		if r := recover(); r != nil {
+			logger.WithField("guild", gs.ID).Errorf("recovered from panic while sending punishment DM\n%v\n%s", r, debug.Stack())
+		}
+	}()
+
+	var appealLink string
+	var extraButtons []discordgo.InteractiveComponent
+	isBan := action.Prefix == MABanned.Prefix
+	if isBan {
+		appealLink = banAppealLinkIfOpen(config, gs.ID)
+		if banAppealDMButtonAvailable(config, gs.ID) {
+			extraButtons = append(extraButtons, banAppealDMButton(gs.ID))
+		}
+	}
+
+	defaultDMMessage := DefaultDMMessage
+	if isBan {
+		defaultDMMessage = DefaultBanDMMessage
+	}
+
 	if dmMsg == "" {
-		dmMsg = DefaultDMMessage
+		dmMsg = defaultDMMessage
 	}
 
-	// Execute and send the DM message template
-	ctx := templates.NewContext(gs, channel, member)
-	if executedFromCommandTemplate {
-		ctx.ExecutedFrom = templates.ExecutedFromNestedCommandTemplate
-	} else {
-		ctx.ExecutedFrom = templates.ExecutedFromCommandTemplate
-	}
-	ctx.Data["Reason"] = reason
-	if duration > 0 {
-		ctx.Data["Duration"] = duration
-		ctx.Data["HumanDuration"] = common.HumanizeDuration(common.DurationPrecisionMinutes, duration)
-	} else {
-		ctx.Data["Duration"] = 0
-		ctx.Data["HumanDuration"] = "never"
-	}
-	ctx.Data["Author"] = author
-	ctx.Data["ModAction"] = action
-	ctx.Data["Message"] = message
+	executeDM := func(source string) (string, error) {
+		ctx := templates.NewContext(gs, channel, member)
+		if executedFromCommandTemplate {
+			ctx.ExecutedFrom = templates.ExecutedFromNestedCommandTemplate
+		} else {
+			ctx.ExecutedFrom = templates.ExecutedFromCommandTemplate
+		}
+		ctx.Data["Reason"] = reason
+		if duration > 0 {
+			ctx.Data["Duration"] = duration
+			ctx.Data["HumanDuration"] = common.HumanizeDuration(common.DurationPrecisionMinutes, duration)
+		} else {
+			ctx.Data["Duration"] = 0
+			ctx.Data["HumanDuration"] = "never"
+		}
+		ctx.Data["Author"] = author
+		ctx.Data["ModAction"] = action
+		ctx.Data["Message"] = message
+		if isBan {
+			ctx.Data["AppealLink"] = appealLink
+		}
 
-	if warningID != -1 {
-		ctx.Data["WarningID"] = warningID
+		if warningID != -1 {
+			ctx.Data["WarningID"] = warningID
+		}
+
+		if duration < 1 {
+			ctx.Data["HumanDuration"] = "permanently"
+		}
+
+		return ctx.Execute(source)
 	}
 
-	if duration < 1 {
-		ctx.Data["HumanDuration"] = "permanently"
-	}
-
-	executed, err := ctx.Execute(dmMsg)
+	executed, err := executeDM(dmMsg)
 	if err != nil {
 		logger.WithError(err).WithField("guild", gs.ID).Warn("Failed executing punishment DM")
-		executed = "Failed executing template."
-		sendFailedDMError(gs.ID, config.ErrorChannel, fmt.Sprintf("Failed executing punishment DM (Action: `%s`).\nError: `%v`", ActionMap[action.Prefix], err))
+		sendFailedDMError(gs.ID, config.ErrorChannel, fmt.Sprintf("Failed executing punishment DM (Action: `%s`), sent the default DM instead.\nError: `%v`", ActionMap[action.Prefix], err))
+
+		executed, err = executeDM(defaultDMMessage)
+		if err != nil {
+			logger.WithError(err).WithField("guild", gs.ID).Error("Failed executing default punishment DM")
+			executed = "Failed executing template."
+		}
 	}
+
+	executed = withBanAppealLink(executed, appealLink)
 
 	if strings.TrimSpace(executed) != "" {
 		msgSend := &discordgo.MessageSend{
 			Embeds: []*discordgo.MessageEmbed{
 				{
-					Description: common.ReplaceServerInvites(executed, 0, "[removed-server-invite]"),
+					Description: executed,
 				},
 			},
-			Components: bot.GenerateServerInfoButton(gs.ID),
+			Components: bot.DMComponents(gs.ID, nil, 0, extraButtons...),
 		}
 
 		err = bot.SendDMComplexMessage(member.User.ID, msgSend)
@@ -296,7 +344,7 @@ func DeleteMessages(guildID, channelID int64, filterUser int64, deleteNum, fetch
 
 	toDelete := make([]int64, 0)
 	now := time.Now()
-	for i := 0; i < len(msgs); i++ {
+	for i := range msgs {
 		if filterUser == 0 || msgs[i].Author.ID == filterUser {
 
 			// Can only bulk delete messages up to 2 weeks (but add 1 minute buffer account for time sync issues and other smallies)

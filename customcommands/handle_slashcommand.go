@@ -34,7 +34,7 @@ var cachedCommandsSlashTrigger = common.CacheSet.RegisterSlot("custom_commands_s
 // BotCachedGetCommandsWithSlashTrigger returns the (cached) slash command custom
 // commands for a guild.
 func BotCachedGetCommandsWithSlashTrigger(guildID int64, ctx context.Context) ([]*models.CustomCommand, error) {
-	v, err := cachedCommandsSlashTrigger.GetCustomFetch(guildID, func(key interface{}) (interface{}, error) {
+	v, err := cachedCommandsSlashTrigger.GetCustomFetch(guildID, func(key any) (any, error) {
 		var cmds []*models.CustomCommand
 		var err error
 		common.LogLongCallTime(time.Second, true, "Took longer than a second to fetch custom commands from db", logrus.Fields{"guild": guildID}, func() {
@@ -118,6 +118,8 @@ func ExecuteCustomCommandFromSlash(cc *models.CustomCommand, gs *dstate.GuildSet
 	tmplCtx.Data["IsSlashCommand"] = true
 	tmplCtx.Data["CommandName"] = data.Name
 	tmplCtx.Data["Cmd"] = data.Name
+	tmplCtx.Data["SlashID"] = data.ID
+	tmplCtx.Data["SlashMention"] = fmt.Sprintf("</%s:%d>", data.Name, data.ID)
 
 	stored := parseSlashCommandData(cc)
 
@@ -139,13 +141,20 @@ func ExecuteCustomCommandFromSlash(cc *models.CustomCommand, gs *dstate.GuildSet
 	}
 	tmplCtx.Data["SubCommand"] = subName
 
+	subMentions := make(templates.SDict, len(stored.Subcommands))
+	for _, s := range stored.Subcommands {
+		name := strings.ToLower(s.Name)
+		subMentions[name] = fmt.Sprintf("</%s %s:%d>", data.Name, name, data.ID)
+	}
+	tmplCtx.Data["SubCommandMentions"] = subMentions
+
 	provided := make(map[string]*discordgo.ApplicationCommandInteractionDataOption, len(leafOptions))
 	for _, o := range leafOptions {
 		provided[strings.ToLower(o.Name)] = o
 	}
 
 	options := templates.SDict{}
-	args := make([]interface{}, 0, len(defs)+1)
+	args := make([]any, 0, len(defs)+1)
 	args = append(args, data.Name)
 	for _, def := range defs {
 		o, ok := provided[strings.ToLower(def.Name)]
@@ -178,7 +187,7 @@ func ExecuteCustomCommandFromSlash(cc *models.CustomCommand, gs *dstate.GuildSet
 // resolveSlashOptionValue converts a provided interaction option into the value
 // exposed to templates, resolving snowflake-typed options against the resolved
 // data Discord sent with the interaction.
-func resolveSlashOptionValue(o *discordgo.ApplicationCommandInteractionDataOption, data *discordgo.ApplicationCommandInteractionData) interface{} {
+func resolveSlashOptionValue(o *discordgo.ApplicationCommandInteractionDataOption, data *discordgo.ApplicationCommandInteractionData) any {
 	switch o.Type {
 	case discordgo.ApplicationCommandOptionString:
 		if v, ok := o.Value.(string); ok {

@@ -5,13 +5,12 @@
 (function () {
     "use strict";
 
-    let BUTTON_STYLES = {
-        1: { bg: "#5865f2", fg: "#fff" },
-        2: { bg: "#4f545c", fg: "#fff" },
-        3: { bg: "#248046", fg: "#fff" },
-        4: { bg: "#da373c", fg: "#fff" },
-        5: { bg: "#4f545c", fg: "#fff" }
-    };
+    let preview = window.YAGDiscordPreview;
+    let renderComponents = preview.renderComponents;
+    let renderText = preview.renderText;
+    let renderMarkdown = preview.renderMarkdown;
+    let renderInlineMarkdown = preview.renderInlineMarkdown;
+    let emojiNode = preview.emojiNode;
 
     let NODE_TITLES = { 1: "Action Row", 9: "Section", 10: "Text", 12: "Media Gallery", 14: "Separator", 17: "Container" };
 
@@ -49,6 +48,27 @@
         els.submitIcon = document.getElementById("mc-submit-icon");
         els.editHint = document.getElementById("mc-edit-hint");
         els.typeLockNote = document.getElementById("mc-type-lock-note");
+        els.code = document.getElementById("mc-code");
+        els.codeCopy = document.getElementById("mc-code-copy");
+        els.codeView = document.getElementById("mc-code-view");
+        if (els.codeCopy) els.codeCopy.addEventListener("click", copyCode);
+        root.querySelectorAll(".mc-pane-tabs label").forEach(function (label) {
+            label.addEventListener("click", function (e) {
+                e.preventDefault();
+                let input = label.querySelector("input");
+                if (input) setPane(input.value);
+            });
+        });
+        root.querySelectorAll(".mc-view-toggle label").forEach(function (label) {
+            label.addEventListener("click", function (e) {
+                e.preventDefault();
+                let input = label.querySelector("input");
+                if (input) setView(input.value);
+            });
+        });
+        root.addEventListener("change", function (e) {
+            if (e.target.type === "checkbox") renderPreview();
+        });
 
         root.querySelectorAll(".mc-action-toggle label").forEach(function (label) {
             label.addEventListener("click", function (e) {
@@ -80,6 +100,7 @@
         setAction("create");
         setMode("normal");
         renderEmbeds();
+        if (window.YAGEmojiPicker) YAGEmojiPicker.enhance(root);
     }
 
     function base() { return "/manage/" + els.guildID + "/messagecreator"; }
@@ -114,6 +135,23 @@
         }
     }
 
+    function setPane(pane) {
+        els.root.setAttribute("data-pane", pane);
+        els.root.querySelectorAll("input[name=mc-pane]").forEach(function (r) { r.checked = r.value === pane; });
+        syncToggle("mc-pane");
+        if (pane !== "edit") setView(pane);
+        window.scrollTo(0, els.root.getBoundingClientRect().top + window.scrollY - 70);
+    }
+
+    function setView(view) {
+        let code = view === "code";
+        els.root.querySelectorAll("input[name=mc-view]").forEach(function (r) { r.checked = r.value === view; });
+        syncToggle("mc-view");
+        show(els.preview, !code);
+        show(els.codeView, code);
+        show(els.codeCopy, code);
+    }
+
     function setMode(mode) {
         currentMode = mode;
         els.root.querySelectorAll("input[name=mc-mode]").forEach(function (r) { r.checked = r.value === mode; });
@@ -123,7 +161,7 @@
         show(els.normalFields, !v2);
         els.componentsLabel.innerHTML = v2
             ? "Components"
-            : 'Components <span class="text-muted">(optional — buttons &amp; menus)</span>';
+            : 'Components <small class="text-muted">optional, buttons and menus</small>';
         els.modeHint.textContent = v2
             ? "Components V2: content & embeds are replaced by components (Text, Container, Section, …)."
             : "Normal message: content, an embed, and up to 5 rows of buttons / select menus.";
@@ -142,8 +180,8 @@
             });
             els.typeLockNote.style.display = "";
             els.typeLockNote.textContent = lockedMode === "componentsv2"
-                ? "This is a Components V2 message — its type can't be changed when editing."
-                : "Editing an existing message — its type can't be changed.";
+                ? "This is a Components V2 message - its type can't be changed when editing."
+                : "Editing an existing message - its type can't be changed.";
         } else {
             radios.forEach(function (r) {
                 let label = r.closest("label");
@@ -233,7 +271,7 @@
             switch (c.type) {
                 case 1:
                     let items = c.components || [];
-                    if (!items.length) errs.push("An action row is empty — add a button or select menu, or remove it.");
+                    if (!items.length) errs.push("An action row is empty - add a button or select menu, or remove it.");
                     if (items.length > 5) errs.push("An action row can have at most 5 components.");
                     if (items.some(function (x) { return x.type !== 2; }) && items.length > 1) {
                         errs.push("A select menu can't share an action row with other components.");
@@ -320,15 +358,15 @@
     }
 
     function embedCard(e, idx) {
-        let card = el("div", { class: "mc-node" });
-        card.appendChild(nodeHeader("Embed " + (idx + 1), state.embeds, idx, rebuildEmbeds));
+        let node = nodeCard("Embed " + (idx + 1), state.embeds, idx, rebuildEmbeds);
+        let card = node.body;
 
         card.appendChild(el("div", { class: "form-row" }, [
             el("div", { class: "col-md-8" }, [field("Title", e.title, function (v) { e.title = v; refreshPreview(); })]),
             el("div", { class: "col-md-4" }, [colorField("Color", e.color, function (v) { e.color = v; refreshPreview(); })])
         ]));
         card.appendChild(field("Title URL", e.url, function (v) { e.url = v; refreshPreview(); }, { placeholder: "https://..." }));
-        card.appendChild(field("Description", e.description, function (v) { e.description = v; refreshPreview(); }, { textarea: true, rows: 3 }));
+        card.appendChild(field("Description", e.description, function (v) { e.description = v; refreshPreview(); }, { textarea: true, rows: 3, emojiPicker: "insert" }));
         card.appendChild(el("div", { class: "form-row" }, [
             el("div", { class: "col-md-6" }, [field("Image URL", e.imageUrl, function (v) { e.imageUrl = v; refreshPreview(); }, { placeholder: "https://..." })]),
             el("div", { class: "col-md-6" }, [field("Thumbnail URL", e.thumbUrl, function (v) { e.thumbUrl = v; refreshPreview(); }, { placeholder: "https://..." })])
@@ -341,27 +379,23 @@
             el("div", { class: "col-md-8" }, [field("Footer text", e.footerText, function (v) { e.footerText = v; refreshPreview(); })]),
             el("div", { class: "col-md-4" }, [field("Footer icon URL", e.footerIcon, function (v) { e.footerIcon = v; refreshPreview(); }, { placeholder: "https://..." })])
         ]));
-        let tsCb = el("input", { type: "checkbox" }); tsCb.className = "mr-2"; tsCb.checked = !!e.ts;
-        tsCb.addEventListener("change", function () { e.ts = tsCb.checked; refreshPreview(); });
-        card.appendChild(el("label", { class: "d-flex align-items-center mb-2" }, [tsCb, "Include current timestamp in footer"]));
+        card.appendChild(switchField("Include current timestamp in footer", !!e.ts, function (on) { e.ts = on; refreshPreview(); }, "mb-2"));
 
         card.appendChild(el("hr", { class: "my-2" }));
         card.appendChild(el("label", { class: "small d-block mb-1" }, ["Fields"]));
         e.fields = e.fields || [];
         e.fields.forEach(function (f, fi) {
-            let inlineCb = el("input", { type: "checkbox" }); inlineCb.checked = !!f.inline;
-            inlineCb.addEventListener("change", function () { f.inline = inlineCb.checked; refreshPreview(); });
             card.appendChild(el("div", { class: "mc-opt-row" }, [
                 inlineInput("Field name", f.name, function (v) { f.name = v; refreshPreview(); }),
                 inlineInput("Field value", f.value, function (v) { f.value = v; refreshPreview(); }),
-                el("label", { class: "mb-0 small text-nowrap", title: "Display inline" }, [inlineCb, " in"]),
-                btn('<i class="fas fa-times"></i>', "btn-block btn-danger", function () { e.fields.splice(fi, 1); renderEmbeds(); renderPreview(); }, { noconfirm: true })
+                switchField("Inline", !!f.inline, function (on) { f.inline = on; refreshPreview(); }, "small text-nowrap", true),
+                removeBtn("Remove field", function () { e.fields.splice(fi, 1); renderEmbeds(); renderPreview(); })
             ]));
         });
         if (e.fields.length < 25) {
             card.appendChild(btn("+ Field", "btn-block btn-outline-secondary", function () { e.fields.push({ name: "", value: "", inline: false }); renderEmbeds(); renderPreview(); }));
         }
-        return card;
+        return node.card;
     }
 
     // Build clean Discord embed objects from the model, dropping empty ones.
@@ -414,12 +448,11 @@
     function colorField(labelText, value, oninput) {
         let selected = (typeof value === "number") ? value : hexToInt("#5865f2");
         let enabled = typeof value === "number";
-        let cb = el("input", { type: "checkbox" }); cb.className = "mr-2"; cb.checked = enabled;
-        let pickerWrap = el("div", { class: "mt-1" }, [colorPicker(value, function (v) { selected = v; if (cb.checked) oninput(v); })]);
+        let on = enabled;
+        let pickerWrap = el("div", { class: "mt-1" }, [colorPicker(value, function (v) { selected = v; if (on) oninput(v); })]);
         show(pickerWrap, enabled);
-        cb.addEventListener("change", function () { show(pickerWrap, cb.checked); oninput(cb.checked ? selected : undefined); });
         return el("div", { class: "form-group mb-2" }, [
-            el("label", { class: "small mb-1 d-block" }, [cb, labelText]),
+            switchField(labelText, enabled, function (checked) { on = checked; show(pickerWrap, on); oninput(on ? selected : undefined); }, "small", true),
             pickerWrap
         ]);
     }
@@ -427,8 +460,8 @@
     function showCompError(msg) { if (els.compError) els.compError.textContent = msg || ""; }
 
 
-    // refreshPreview: a field changed — refresh the preview without rebuilding the editor (keeps
-    // input focus). rebuildEditor: structure changed — re-render the whole builder.
+    // refreshPreview: a field changed - refresh the preview without rebuilding the editor (keeps
+    // input focus). rebuildEditor: structure changed - re-render the whole builder.
     function refreshPreview() { renderPreview(); }
     function rebuildEditor() { renderBuilder(); renderPreview(); }
 
@@ -475,22 +508,28 @@
         return bar;
     }
 
-    function nodeHeader(title, list, idx, onChange) {
+    // nodeCard builds the card for one embed or component, with move and remove buttons in its header.
+    function nodeCard(title, list, idx, onChange) {
         onChange = onChange || rebuildEditor;
-        let tools = el("div", { class: "mc-node-tools" }, [
-            btn('<i class="fas fa-arrow-up"></i>', "btn-sm btn-secondary", function () { move(list, idx, -1, onChange); }, { title: "Move up" }),
-            btn('<i class="fas fa-arrow-down"></i>', "btn-sm btn-secondary", function () { move(list, idx, 1, onChange); }, { title: "Move down" }),
-            btn('<i class="fas fa-trash"></i>', "btn-sm btn-danger", function () { list.splice(idx, 1); onChange(); }, { noconfirm: true, title: "Remove" })
+        let tools = el("div", { class: "btn-group btn-group-sm mc-node-tools" }, [
+            btn('<i class="fas fa-chevron-up"></i>', "btn-primary", function () { move(list, idx, -1, onChange); }, { title: "Move up" }),
+            btn('<i class="fas fa-chevron-down"></i>', "btn-primary", function () { move(list, idx, 1, onChange); }, { title: "Move down" }),
+            btn('<i class="fas fa-trash"></i>', "btn-danger", function () { list.splice(idx, 1); onChange(); }, { noconfirm: true, title: "Remove" })
         ]);
-        return el("div", { class: "mc-node-header" }, [el("span", { class: "mc-node-title" }, [title]), tools]);
+        let body = el("div", { class: "card-body" });
+        let card = el("section", { class: "card mc-node" }, [
+            el("header", { class: "card-header" }, [el("h2", { class: "card-title" }, [title]), tools]),
+            body
+        ]);
+        return { card: card, body: body };
     }
 
     function renderNode(node, list, idx) {
-        let card = el("div", { class: "mc-node" });
-        card.appendChild(nodeHeader(NODE_TITLES[node.type] || ("Type " + node.type), list, idx));
+        let wrap = nodeCard(NODE_TITLES[node.type] || ("Type " + node.type), list, idx);
+        let card = wrap.body;
         let body;
         switch (node.type) {
-            case 10: body = field("Text (markdown supported)", node.content, function (v) { node.content = v; refreshPreview(); }, { textarea: true, rows: 2 }); break;
+            case 10: body = field("Text (markdown supported)", node.content, function (v) { node.content = v; refreshPreview(); }, { textarea: true, rows: 2, emojiPicker: "insert" }); break;
             case 14: body = separatorBody(node); break;
             case 1: body = actionRowBody(node); break;
             case 9: body = sectionBody(node); break;
@@ -499,14 +538,12 @@
             default: body = el("div", { class: "text-muted small" }, ["Unsupported component type " + node.type]);
         }
         card.appendChild(body);
-        return card;
+        return wrap.card;
     }
 
     function separatorBody(node) {
         let wrap = el("div");
-        let cb = el("input", { type: "checkbox" }); cb.className = "mr-2"; cb.checked = node.divider !== false;
-        cb.addEventListener("change", function () { node.divider = cb.checked; refreshPreview(); });
-        wrap.appendChild(el("label", { class: "small d-block mb-2" }, [cb, "Show divider line"]));
+        wrap.appendChild(switchField("Show divider line", node.divider !== false, function (on) { node.divider = on; refreshPreview(); }, "small mb-2"));
         wrap.appendChild(selectField("Spacing", [{ v: 1, t: "Small" }, { v: 2, t: "Large" }], node.spacing || 1, function (v) { node.spacing = parseInt(v); refreshPreview(); }));
         return wrap;
     }
@@ -531,10 +568,9 @@
     }
 
     function interactiveEditor(child, list, idx) {
-        let card = el("div", { class: "mc-node" });
-        card.appendChild(nodeHeader(child.type === 2 ? "Button" : "Select menu", list, idx));
-        card.appendChild(child.type === 2 ? buttonEditor(child) : selectEditor(child));
-        return card;
+        let wrap = nodeCard(child.type === 2 ? "Button" : "Select menu", list, idx);
+        wrap.body.appendChild(child.type === 2 ? buttonEditor(child) : selectEditor(child));
+        return wrap.card;
     }
 
     function buttonEditor(node) {
@@ -553,9 +589,10 @@
         } else {
             wrap.appendChild(customIdField(node));
         }
-        wrap.appendChild(field("Emoji (optional)", node.emoji && node.emoji.name, function (v) {
-            if (v) node.emoji = { name: v }; else delete node.emoji; refreshPreview();
-        }, { placeholder: "e.g. 🔥" }));
+        wrap.appendChild(field("Emoji (optional)", formatEmoji(node.emoji), function (v) {
+            let emoji = parseEmoji(v);
+            if (emoji) node.emoji = emoji; else delete node.emoji; refreshPreview();
+        }, { placeholder: "e.g. 🔥", emojiPicker: "replace" }));
         return wrap;
     }
 
@@ -581,10 +618,11 @@
             wrap.appendChild(el("label", { class: "small mb-1 d-block" }, ["Options"]));
             node.options.forEach(function (opt, oi) {
                 wrap.appendChild(el("div", { class: "mc-opt-row" }, [
+                    optionEmojiButton(opt),
                     inlineInput("Label", opt.label, function (v) { opt.label = v; refreshPreview(); }),
                     inlineInput("Value", opt.value, function (v) { opt.value = v; refreshPreview(); }),
                     inlineInput("Description", opt.description, function (v) { if (v) opt.description = v; else delete opt.description; refreshPreview(); }),
-                    node.options.length > 1 ? btn('<i class="fas fa-times"></i>', "btn-block btn-danger", function () { node.options.splice(oi, 1); rebuildEditor(); }, { noconfirm: true }) : null
+                    node.options.length > 1 ? removeBtn("Remove option", function () { node.options.splice(oi, 1); rebuildEditor(); }) : null
                 ]));
             });
             if (node.options.length < 25) {
@@ -605,7 +643,7 @@
             ta.addEventListener("input", function () { td.content = ta.value; refreshPreview(); });
             body.appendChild(el("div", { class: "mc-opt-row" }, [
                 ta,
-                node.components.length > 1 ? btn('<i class="fas fa-times"></i>', "btn-block btn-danger", function () { node.components.splice(ti, 1); rebuildEditor(); }, { noconfirm: true }) : null
+                node.components.length > 1 ? removeBtn("Remove text", function () { node.components.splice(ti, 1); rebuildEditor(); }) : null
             ]));
         });
         if (node.components.length < 3) body.appendChild(btn("+ Text", "btn-block btn-outline-secondary", function () { node.components.push(defText()); rebuildEditor(); }));
@@ -639,7 +677,7 @@
             body.appendChild(el("div", { class: "mc-opt-row" }, [
                 inlineInput("Image / video URL", it.media.url, function (v) { it.media.url = v; refreshPreview(); }),
                 inlineInput("Description (optional)", it.description, function (v) { if (v) it.description = v; else delete it.description; refreshPreview(); }),
-                node.items.length > 1 ? btn('<i class="fas fa-times"></i>', "btn-block btn-danger", function () { node.items.splice(ii, 1); rebuildEditor(); }, { noconfirm: true }) : null
+                node.items.length > 1 ? removeBtn("Remove item", function () { node.items.splice(ii, 1); rebuildEditor(); }) : null
             ]));
         });
         if (node.items.length < 10) body.appendChild(btn("+ Item", "btn-block btn-outline-secondary", function () { node.items.push({ media: { url: "" } }); rebuildEditor(); }));
@@ -720,19 +758,212 @@
         if (msg.embeds) msg.embeds.forEach(function (e) { els.preview.appendChild(renderEmbed(e)); });
         if (msg.components) renderComponents(msg.components, els.preview);
         if (!els.preview.childNodes.length) els.preview.appendChild(div("text-muted", "Nothing to preview yet."));
+        renderCode(msg);
+    }
+
+    // ---- Custom command code ----
+    // The generated code is a tree of calls: {fn, entries}, where each entry is one line of items,
+    // so key/value pairs stay together.
+
+    let CODE_INDENT = "\t";
+    let BUTTON_STYLE_NAMES = { 1: "primary", 2: "secondary", 3: "success", 4: "danger", 5: "link" };
+    let MENU_TYPE_NAMES = { 5: "user", 6: "role", 7: "mentionable", 8: "channel" };
+
+    function codeString(s) {
+        s = String(s);
+        if (s.indexOf("\n") !== -1 && s.indexOf("`") === -1) return "`" + s + "`";
+        return JSON.stringify(s);
+    }
+
+    function codeCall(fn, entries) { return { fn: fn, entries: entries }; }
+    function codePairs(fn, pairs) { return codeCall(fn, pairs.map(function (p) { return [codeString(p[0]), p[1]]; })); }
+    function codeSlice(items) { return codeCall("cslice", items.map(function (i) { return [i]; })); }
+
+    function codeRender(x, depth) {
+        if (typeof x === "string") return x;
+        if (!x.entries.length) return "(" + x.fn + ")";
+        let pad = CODE_INDENT.repeat(depth + 1);
+        return "(" + x.fn + "\n" + x.entries.map(function (e) {
+            return pad + e.map(function (i) { return codeRender(i, depth + 1); }).join(" ");
+        }).join("\n") + "\n" + CODE_INDENT.repeat(depth) + ")";
+    }
+
+    function codeSend(call) { return "{{ sendMessage nil " + codeRender(call, 0) + " }}"; }
+
+    function codeValue(v) {
+        if (Array.isArray(v)) return codeSlice(v.map(codeValue));
+        if (v && typeof v === "object") return codePairs("sdict", Object.keys(v).map(function (k) { return [k, codeValue(v[k])]; }));
+        if (typeof v === "string") return codeString(v);
+        return String(v);
+    }
+
+    function codeEmoji(emoji) {
+        let pairs = [];
+        if (emoji.id) pairs.push(["id", codeString(emoji.id)]);
+        pairs.push(["name", codeString(emoji.name || "")]);
+        if (emoji.animated) pairs.push(["animated", "true"]);
+        return codePairs("sdict", pairs);
+    }
+
+    function codeCustomID(id) {
+        id = id || "";
+        return id.indexOf(TEMPLATE_PREFIX) === 0 ? id.slice(TEMPLATE_PREFIX.length) : id;
+    }
+
+    function codeButton(b) {
+        let pairs = [];
+        if (b.label) pairs.push(["label", codeString(b.label)]);
+        if (b.emoji) pairs.push(["emoji", codeEmoji(b.emoji)]);
+        pairs.push(["style", codeString(BUTTON_STYLE_NAMES[b.style] || "primary")]);
+        if (b.style === 5) pairs.push(["url", codeString(b.url || "")]);
+        else if (codeCustomID(b.custom_id)) pairs.push(["custom_id", codeString(codeCustomID(b.custom_id))]);
+        if (b.disabled) pairs.push(["disabled", "true"]);
+        return codePairs("cbutton", pairs);
+    }
+
+    function codeMenu(m) {
+        let pairs = [];
+        if (MENU_TYPE_NAMES[m.type]) pairs.push(["type", codeString(MENU_TYPE_NAMES[m.type])]);
+        if (codeCustomID(m.custom_id)) pairs.push(["custom_id", codeString(codeCustomID(m.custom_id))]);
+        if (m.placeholder) pairs.push(["placeholder", codeString(m.placeholder)]);
+        if (m.min_values != null) pairs.push(["min_values", String(m.min_values)]);
+        if (m.max_values != null) pairs.push(["max_values", String(m.max_values)]);
+        if (m.disabled) pairs.push(["disabled", "true"]);
+        if (m.options && m.options.length) {
+            pairs.push(["options", codeSlice(m.options.map(function (o) {
+                let opt = [["label", codeString(o.label || "")], ["value", codeString(o.value || "")]];
+                if (o.description) opt.push(["description", codeString(o.description)]);
+                if (o.emoji) opt.push(["emoji", codeEmoji(o.emoji)]);
+                if (o.default) opt.push(["default", "true"]);
+                return codePairs("sdict", opt);
+            }))]);
+        }
+        return codePairs("cmenu", pairs);
+    }
+
+    function codeInteractive(c) { return c.type === 2 ? codeButton(c) : codeMenu(c); }
+
+    function codeEmbed(e) {
+        return codePairs("cembed", Object.keys(e).map(function (k) {
+            return [k, k === "timestamp" ? "currentTime" : codeValue(e[k])];
+        }));
+    }
+
+    function codeAllowedMentions() {
+        let parse = ["users"];
+        let roles = document.getElementById("mc-allow-role-mentions");
+        let everyone = document.getElementById("mc-allow-everyone-mentions");
+        if (roles && roles.checked) parse.push("roles");
+        if (everyone && everyone.checked) parse.push("everyone");
+        if (parse.length === 1) return null;
+        return codePairs("sdict", [["parse", codeSlice(parse.map(codeString))]]);
+    }
+
+    function codeV2Entries(comps) {
+        let entries = [];
+        comps.forEach(function (c) {
+            if (c.type === 10) {
+                entries.push(["text", codeString(c.content || "")]);
+            } else if (c.type === 9) {
+                let texts = (c.components || []).map(function (t) { return codeString(t.content || ""); });
+                let pairs = [["text", texts.length === 1 ? texts[0] : codeSlice(texts)]];
+                let acc = c.accessory;
+                if (acc && acc.type === 2) pairs.push(["button", codeButton(acc)]);
+                else if (acc && acc.type === 11) {
+                    let thumb = [["media", codeString((acc.media && acc.media.url) || "")]];
+                    if (acc.description) thumb.push(["description", codeString(acc.description)]);
+                    if (acc.spoiler) thumb.push(["spoiler", "true"]);
+                    pairs.push(["thumbnail", codePairs("sdict", thumb)]);
+                }
+                entries.push(["section", codePairs("sdict", pairs)]);
+            } else if (c.type === 12) {
+                entries.push(["gallery", codeSlice((c.items || []).map(function (it) {
+                    let item = [["media", codeString((it.media && it.media.url) || "")]];
+                    if (it.description) item.push(["description", codeString(it.description)]);
+                    if (it.spoiler) item.push(["spoiler", "true"]);
+                    return codePairs("sdict", item);
+                }))]);
+            } else if (c.type === 14) {
+                entries.push(["separator", c.spacing === 2 ? "true" : "false"]);
+            } else if (c.type === 17) {
+                let pairs = [];
+                if (typeof c.accent_color === "number") pairs.push(["color", String(c.accent_color)]);
+                if (c.spoiler) pairs.push(["spoiler", "true"]);
+                pairs.push(["components", codePairs("componentBuilder", codeV2Entries(c.components || []))]);
+                entries.push(["container", codePairs("sdict", pairs)]);
+            } else if (c.type === 1) {
+                entries.push(["interactive_components", codeSlice((c.components || []).map(codeInteractive))]);
+            }
+        });
+        return entries;
+    }
+
+    function generateCode(msg) {
+        let mentions = codeAllowedMentions();
+        if (currentMode === "componentsv2") {
+            let entries = codeV2Entries(msg.components || []);
+            if (!entries.length) return "";
+            if (mentions) entries.push(["allowed_mentions", mentions]);
+            return codeSend(codePairs("componentBuilder", entries));
+        }
+
+        let pairs = [];
+        let embeds = (msg.embeds || []).map(codeEmbed);
+        if (msg.content) pairs.push(["content", codeString(msg.content)]);
+        if (embeds.length) pairs.push(["embed", embeds.length === 1 ? embeds[0] : codeSlice(embeds)]);
+        if (msg.components && msg.components.length) {
+            pairs.push(["components", codeSlice(msg.components.map(function (row) {
+                return codeSlice((row.components || []).map(codeInteractive));
+            }))]);
+        }
+        if (mentions) pairs.push(["allowed_mentions", mentions]);
+        if (!pairs.length) return "";
+        return codeSend(codePairs("complexMessage", pairs));
+    }
+
+    function renderCode(msg) {
+        if (!els.code) return;
+        els.code.textContent = generateCode(msg) || "Add some content to get its code.";
+    }
+
+    function copyCode() {
+        let text = generateCode(computeMessage().message);
+        if (!text) return;
+        let done = function () {
+            els.codeCopy.textContent = "Copied";
+            setTimeout(function () { els.codeCopy.textContent = "Copy"; }, 1500);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () { selectCode(); });
+        } else {
+            selectCode();
+        }
+    }
+
+    function selectCode() {
+        let range = document.createRange();
+        range.selectNodeContents(els.code);
+        let sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
     }
 
     function renderEmbed(e) {
         let box = div("mc-embed");
         box.style.borderLeftColor = (typeof e.color === "number") ? intToHex(e.color) : "#4f545c";
+        let top = div("mc-embed-top");
+        let main = div("mc-embed-main");
+        top.appendChild(main);
+        if (e.thumbnail && e.thumbnail.url) top.appendChild(img(e.thumbnail.url, "mc-embed-thumb"));
+        box.appendChild(top);
         if (e.author && e.author.name) {
             let a = div("mc-embed-author");
             if (e.author.icon_url) a.appendChild(img(e.author.icon_url, "mc-embed-author-icon"));
             a.appendChild(span(e.author.name));
-            box.appendChild(a);
+            main.appendChild(a);
         }
-        if (e.title) box.appendChild(div("mc-embed-title", e.title)); // titles render no markdown on Discord
-        if (e.description) { let d = div("mc-embed-desc"); d.appendChild(renderMarkdown(e.description)); box.appendChild(d); }
+        if (e.title) main.appendChild(div("mc-embed-title", e.title)); // titles render no markdown on Discord
+        if (e.description) { let d = div("mc-embed-desc"); d.appendChild(renderMarkdown(e.description)); main.appendChild(d); }
         if (e.fields && e.fields.length) {
             let grid = div("mc-embed-fields");
             e.fields.forEach(function (f) {
@@ -741,10 +972,9 @@
                 let fv = div("mc-embed-field-value"); fv.appendChild(renderMarkdown(f.value || ""));
                 fd.appendChild(fn); fd.appendChild(fv); grid.appendChild(fd);
             });
-            box.appendChild(grid);
+            main.appendChild(grid);
         }
         if (e.image && e.image.url) box.appendChild(img(e.image.url, "mc-embed-image"));
-        if (e.thumbnail && e.thumbnail.url) box.appendChild(img(e.thumbnail.url, "mc-embed-thumb"));
         if (e.footer && (e.footer.text || e.timestamp)) {
             let f = div("mc-embed-footer");
             if (e.footer.icon_url) f.appendChild(img(e.footer.icon_url, "mc-embed-footer-icon"));
@@ -755,66 +985,6 @@
         }
         return box;
     }
-
-    function renderComponents(comps, parent) { comps.forEach(function (c) { parent.appendChild(renderComponent(c)); }); }
-
-    function renderComponent(c) {
-        switch (c.type) {
-            case 10: return renderText(c.content || "", "mc-v2-text");
-            case 17:
-                let ct = div("mc-v2-container");
-                ct.style.borderLeftColor = (typeof c.accent_color === "number") ? intToHex(c.accent_color) : "transparent";
-                renderComponents(c.components || [], ct);
-                return ct;
-            case 9:
-                let sec = div("mc-v2-section");
-                let body = div("mc-v2-section-body");
-                renderComponents(c.components || [], body);
-                sec.appendChild(body);
-                if (c.accessory) sec.appendChild(renderAccessory(c.accessory));
-                return sec;
-            case 1:
-                let row = div("mc-v2-row");
-                (c.components || []).forEach(function (ic) { row.appendChild(renderInteractive(ic)); });
-                return row;
-            case 14:
-                let sep = div("mc-v2-separator");
-                if (c.divider !== false) sep.classList.add("mc-divider");
-                return sep;
-            case 12:
-                let g = div("mc-v2-gallery");
-                (c.items || []).forEach(function (it) { if (it.media && it.media.url) g.appendChild(img(it.media.url, "mc-v2-gallery-item")); });
-                return g;
-            default: return renderInteractive(c);
-        }
-    }
-
-    function renderAccessory(acc) {
-        if (acc.type === 11 && acc.media) return img(acc.media.url, "mc-v2-thumb");
-        if (acc.type === 2) return renderInteractive(acc);
-        return div("");
-    }
-
-    function renderInteractive(c) {
-        switch (c.type) {
-            case 2:
-                let st = BUTTON_STYLES[c.style] || BUTTON_STYLES[2];
-                let b = div("mc-v2-button", (c.emoji && c.emoji.name ? c.emoji.name + " " : "") + (c.label || (c.style === 5 ? "Link" : "Button")));
-                b.style.backgroundColor = st.bg; b.style.color = st.fg;
-                if (c.style === 5) { // link buttons show an external-link indicator, like Discord
-                    let icon = document.createElement("i");
-                    icon.className = "fas fa-external-link-alt mc-v2-link-icon";
-                    b.appendChild(icon);
-                }
-                return b;
-            case 3: case 5: case 6: case 7: case 8:
-                return div("mc-v2-select", c.placeholder || "Select…");
-            default:
-                return div("mc-v2-unknown", "[component type " + c.type + "]");
-        }
-    }
-
-    function renderText(text, cls) { let d = div(cls || ""); d.appendChild(renderMarkdown(text)); return d; }
 
 
     function loadMessage() {
@@ -870,6 +1040,20 @@
     }
 
 
+    // switchField builds the dashboard's standard on/off switch with its label.
+    let switchCount = 0;
+    function switchField(labelText, checked, onchange, cls, compact) {
+        let id = "mc-switch-" + (switchCount++);
+        let input = el("input", { type: "checkbox", class: "tgl tgl-flat" + (compact ? " tgl-sm" : ""), id: id });
+        input.checked = checked;
+        input.addEventListener("change", function () { onchange(input.checked); });
+        return el("div", { class: "d-flex align-items-center " + (cls || "") }, [
+            input,
+            el("label", { class: "tgl-btn mb-0", for: id }),
+            el("label", { class: "mb-0 ml-2", for: id }, [labelText])
+        ]);
+    }
+
     function el(tag, attrs, children) {
         let e = document.createElement(tag);
         if (attrs) Object.keys(attrs).forEach(function (k) {
@@ -893,6 +1077,12 @@
         return b;
     }
 
+    function removeBtn(title, onclick) {
+        let b = btn('<i class="fas fa-times"></i>', "btn-sm btn-outline-danger mc-remove", onclick, { noconfirm: true, title: title });
+        b.setAttribute("aria-label", title);
+        return b;
+    }
+
     function field(labelText, value, oninput, opts) {
         opts = opts || {};
         let input = document.createElement(opts.textarea ? "textarea" : "input");
@@ -902,9 +1092,37 @@
         if (opts.maxlength) input.maxLength = opts.maxlength;
         input.value = value == null ? "" : value;
         input.addEventListener("input", function () { oninput(input.value); });
-        let children = [el("label", { class: "small mb-1" }, [labelText]), input];
+        let control = input;
+        if (opts.emojiPicker && window.YAGEmojiPicker) {
+            input.setAttribute("data-emoji-picker", opts.emojiPicker);
+            control = el("div", {}, [input]);
+            YAGEmojiPicker.enhance(control);
+        }
+        let children = [el("label", { class: "small mb-1" }, [labelText]), control];
         if (opts.help) children.push(el("small", { class: "form-text text-muted" }, [opts.help]));
         return el("div", { class: "form-group mb-2" }, children);
+    }
+
+    function parseEmoji(text) { return window.YAGEmojiPicker ? YAGEmojiPicker.parse(text) : (text ? { name: text } : null); }
+    function formatEmoji(emoji) {
+        if (!emoji) return "";
+        return window.YAGEmojiPicker ? YAGEmojiPicker.format(emoji) : (emoji.name || "");
+    }
+
+    function optionEmojiButton(opt) {
+        let b = btn("", "btn-sm btn-outline-primary mc-opt-emoji", function () {
+            if (!window.YAGEmojiPicker) return;
+            YAGEmojiPicker.open(b, function (emoji) { opt.emoji = emoji; rebuildEditor(); });
+        }, { noconfirm: true, title: "Option emoji" });
+        b.setAttribute("aria-label", opt.emoji ? "Change option emoji" : "Pick option emoji");
+        if (opt.emoji && (opt.emoji.id || opt.emoji.name)) {
+            b.appendChild(emojiNode(opt.emoji));
+            b.addEventListener("contextmenu", function (e) { e.preventDefault(); delete opt.emoji; rebuildEditor(); });
+            b.title = "Option emoji (right click to remove)";
+        } else {
+            b.innerHTML = '<i class="far fa-smile" aria-hidden="true"></i>';
+        }
+        return b;
     }
 
     function readonlyField(labelText, value, help) {
@@ -915,7 +1133,7 @@
     }
 
     // The editable custom_id field holds the bare suffix; the "templates-" prefix is added on build.
-    // Components loaded without that prefix are "locked" — shown read-only so their id is preserved.
+    // Components loaded without that prefix are "locked" - shown read-only so their id is preserved.
     function customIdField(node) {
         if (node._locked) {
             return readonlyField("Custom ID (fixed)", node.custom_id,
@@ -966,167 +1184,6 @@
         let i = document.createElement("img");
         i.src = url; if (cls) i.className = cls;
         i.onerror = function () { i.style.display = "none"; };
-        return i;
-    }
-
-    // ---- Markdown renderer ----
-    let INLINE_RULES = [
-        { regex: /\|\|([\s\S]+?)\|\|/, tag: "span", className: "mc-md-spoiler", recurse: true },
-        { regex: /\*\*\*([\s\S]+?)\*\*\*/, build: buildBoldItalicNode },
-        { regex: /\*\*([\s\S]+?)\*\*/, tag: "strong", recurse: true },
-        { regex: /__([\s\S]+?)__/, tag: "u", recurse: true },
-        { regex: /\*([^\s*][\s\S]*?)\*/, tag: "em", recurse: true },
-        { regex: /_([^_]+?)_/, tag: "em", recurse: true },
-        { regex: /~~([\s\S]+?)~~/, tag: "s", recurse: true },
-        { regex: /`([^`\n]+)`/, tag: "code", className: "mc-md-code", recurse: false },
-        { regex: /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/, build: buildLinkNode }
-    ];
-
-    function buildBoldItalicNode(match) {
-        let strong = document.createElement("strong");
-        let em = document.createElement("em");
-        appendInlineMarkdown(em, match[1]);
-        strong.appendChild(em);
-        return strong;
-    }
-
-    function buildLinkNode(match) {
-        if (!/^https?:\/\//i.test(match[2])) return document.createTextNode(match[0]);
-        let anchor = document.createElement("a");
-        anchor.href = match[2];
-        anchor.target = "_blank";
-        anchor.rel = "noopener noreferrer";
-        appendInlineMarkdown(anchor, match[1]);
-        return anchor;
-    }
-
-    function buildInlineNode(rule, match) {
-        if (rule.build) return rule.build(match);
-        let node = document.createElement(rule.tag);
-        if (rule.className) node.className = rule.className;
-        if (rule.recurse) appendInlineMarkdown(node, match[1]);
-        else node.textContent = match[1]; // inline code: contents are literal
-        return node;
-    }
-
-    // Parses inline markdown in `text`, appending the resulting nodes to `parent`.
-    function appendInlineMarkdown(parent, text) {
-        while (text.length) {
-            let earliest = null;
-            for (let i = 0; i < INLINE_RULES.length; i++) {
-                let match = INLINE_RULES[i].regex.exec(text);
-                if (match && (!earliest || match.index < earliest.match.index)) {
-                    earliest = { rule: INLINE_RULES[i], match: match };
-                }
-            }
-            if (!earliest) { parent.appendChild(document.createTextNode(text)); return; }
-            if (earliest.match.index > 0) parent.appendChild(document.createTextNode(text.slice(0, earliest.match.index)));
-            parent.appendChild(buildInlineNode(earliest.rule, earliest.match));
-            text = text.slice(earliest.match.index + earliest.match[0].length);
-        }
-    }
-
-    // Inline-only markdown (no headings / lists / code blocks), e.g. for embed field names.
-    function renderInlineMarkdown(text) {
-        let fragment = document.createDocumentFragment();
-        appendInlineMarkdown(fragment, String(text));
-        return fragment;
-    }
-
-    let BLOCK_PATTERNS = {
-        bullet: /^\s*[-*]\s+(.*)$/,
-        ordered: /^\s*\d+\.\s+(.*)$/,
-        heading: /^(#{1,3})\s+(.*)$/,
-        subtext: /^-#\s+(.*)$/,
-        quote: /^>\s?(.*)$/
-    };
-
-    function isBlockLine(line) {
-        return BLOCK_PATTERNS.bullet.test(line) || BLOCK_PATTERNS.ordered.test(line) ||
-            BLOCK_PATTERNS.heading.test(line) || BLOCK_PATTERNS.subtext.test(line) || BLOCK_PATTERNS.quote.test(line);
-    }
-
-    // Full Discord markdown (code blocks, headings, subtext, quotes, lists, inline marks), e.g. for
-    // message content, Text Display components, embed descriptions and field values.
-    function renderMarkdown(text) {
-        let fragment = document.createDocumentFragment();
-        // Split on fenced code blocks; odd indices hold the (literal) code body.
-        let segments = String(text).split(/```(?:[a-zA-Z0-9_+\-]*\n)?([\s\S]*?)```/);
-        segments.forEach(function (segment, index) {
-            if (index % 2 === 1) fragment.appendChild(buildCodeBlockNode(segment.replace(/\n$/, "")));
-            else if (segment) appendMarkdownBlocks(fragment, segment);
-        });
-        return fragment;
-    }
-
-    function buildCodeBlockNode(code) {
-        let pre = document.createElement("pre");
-        pre.className = "mc-md-codeblock";
-        let codeEl = document.createElement("code");
-        codeEl.textContent = code;
-        pre.appendChild(codeEl);
-        return pre;
-    }
-
-    function buildBlockNode(className, text) {
-        let node = document.createElement("div");
-        node.className = className;
-        appendInlineMarkdown(node, text);
-        return node;
-    }
-
-    function appendMarkdownBlocks(parent, text) {
-        let lines = text.split("\n");
-        let i = 0;
-        while (i < lines.length) {
-            let line = lines[i];
-            if (BLOCK_PATTERNS.bullet.test(line) || BLOCK_PATTERNS.ordered.test(line)) {
-                i = appendListBlock(parent, lines, i, BLOCK_PATTERNS.ordered.test(line));
-                continue;
-            }
-            let heading = BLOCK_PATTERNS.heading.exec(line);
-            if (heading) { parent.appendChild(buildBlockNode("mc-md-h mc-md-h" + heading[1].length, heading[2])); i++; continue; }
-            let subtext = BLOCK_PATTERNS.subtext.exec(line);
-            if (subtext) { parent.appendChild(buildBlockNode("mc-md-subtext", subtext[1])); i++; continue; }
-            let quote = BLOCK_PATTERNS.quote.exec(line);
-            if (quote) {
-                let blockquote = document.createElement("blockquote");
-                blockquote.className = "mc-md-quote";
-                appendInlineMarkdown(blockquote, quote[1]);
-                parent.appendChild(blockquote);
-                i++;
-                continue;
-            }
-            i = appendParagraphBlock(parent, lines, i);
-        }
-    }
-
-    // Appends consecutive list items of one kind; returns the index of the next unconsumed line.
-    function appendListBlock(parent, lines, start, ordered) {
-        let listEl = document.createElement(ordered ? "ol" : "ul");
-        listEl.className = "mc-md-list";
-        let pattern = ordered ? BLOCK_PATTERNS.ordered : BLOCK_PATTERNS.bullet;
-        let i = start, match;
-        for (; i < lines.length && (match = pattern.exec(lines[i])); i++) {
-            let item = document.createElement("li");
-            appendInlineMarkdown(item, match[1]);
-            listEl.appendChild(item);
-        }
-        parent.appendChild(listEl);
-        return i;
-    }
-
-    // Appends a run of consecutive non-block lines as one paragraph (lines joined by <br>); returns
-    // the index of the next unconsumed line.
-    function appendParagraphBlock(parent, lines, start) {
-        let paragraph = document.createElement("div");
-        paragraph.className = "mc-md-line";
-        let i = start;
-        for (; i < lines.length && !isBlockLine(lines[i]); i++) {
-            if (i > start) paragraph.appendChild(document.createElement("br"));
-            appendInlineMarkdown(paragraph, lines[i]);
-        }
-        parent.appendChild(paragraph);
         return i;
     }
 

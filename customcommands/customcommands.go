@@ -564,12 +564,13 @@ func validateContextMenuData(guildID int64, name string, triggerType CommandTrig
 
 	enabledCount := 0
 	for _, e := range existing {
-		if strings.EqualFold(strings.TrimSpace(e.TextTrigger), name) {
-			return false, "Another context menu command of this type in this server already uses that name"
+		if e.Disabled {
+			continue
 		}
-		if !e.Disabled {
-			enabledCount++
+		if isEnabled && strings.EqualFold(strings.TrimSpace(e.TextTrigger), name) {
+			return false, "Another enabled context menu command of this type in this server already uses that name"
 		}
+		enabledCount++
 	}
 
 	max := MaxContextMenuForContext(guildID)
@@ -635,6 +636,21 @@ func (cc *CustomCommand) validateSlashCommand(tmpl web.TemplateData, guildID int
 	return true
 }
 
+// applicationCommandConflict returns why a slash or context menu command can't be
+// enabled in its guild right now, or "" if nothing blocks it.
+func applicationCommandConflict(cc *models.CustomCommand) string {
+	triggerType := CommandTriggerType(cc.TriggerType)
+	if triggerType == CommandTriggerSlash {
+		_, msg := validateSlashCommandData(cc.GuildID, cc.TextTrigger, parseSlashCommandData(cc), cc.LocalID, true)
+		return msg
+	}
+	if IsContextMenuTrigger(triggerType) {
+		_, msg := validateContextMenuData(cc.GuildID, cc.TextTrigger, triggerType, cc.LocalID, true)
+		return msg
+	}
+	return ""
+}
+
 // validateSlashCommandData enforces Discord's slash command rules and the per-guild
 // name-uniqueness and count limits. It is shared by the editor form and the import
 // path so both reject invalid/duplicate commands. currentLocalID is the local_id of
@@ -656,10 +672,10 @@ func validateSlashCommandData(guildID int64, name string, data slashCommandData,
 
 	if len(data.Subcommands) > 0 {
 		// A command with subcommands is invoked as "/<command> <subcommand>" and has no
-		// top-level options; subcommands reuse the same 3-free / 10-premium limit.
-		maxSubs := MaxSlashCommandForContext(guildID)
+		// top-level options, so subcommands have their own limit.
+		maxSubs := MaxSubCommandForContext(guildID)
 		if len(data.Subcommands) > maxSubs {
-			return false, fmt.Sprintf("You can have at most %d subcommands per command (%d on premium servers)", maxSubs, MaxSlashCommandCCsPremium)
+			return false, fmt.Sprintf("You can have at most %d subcommands per command (%d on premium servers)", maxSubs, MaxSubCommandCCsPremium)
 		}
 
 		seenSubs := make(map[string]bool, len(data.Subcommands))
@@ -694,12 +710,13 @@ func validateSlashCommandData(guildID int64, name string, data slashCommandData,
 
 	enabledCount := 0
 	for _, e := range existing {
-		if strings.EqualFold(e.TextTrigger, name) {
+		if e.Disabled {
+			continue
+		}
+		if isEnabled && strings.EqualFold(e.TextTrigger, name) {
 			return false, "Another slash command in this server already uses that name"
 		}
-		if !e.Disabled {
-			enabledCount++
-		}
+		enabledCount++
 	}
 
 	maxSlash := MaxSlashCommandForContext(guildID)
@@ -889,10 +906,8 @@ func CmdRunsInChannel(cc *models.CustomCommand, channel int64) bool {
 	}
 
 	// check command specifc restrictions
-	for _, v := range cc.Channels {
-		if v == channel {
-			return cc.ChannelsWhitelistMode
-		}
+	if slices.Contains(cc.Channels, channel) {
+		return cc.ChannelsWhitelistMode
 	}
 
 	// Not found
@@ -956,10 +971,12 @@ const (
 	MaxCCResponsesLengthPremium   = 20000
 	MaxUserMessages               = 20
 	MaxGroups                     = 50
-	MaxSlashCommandCCs            = 3
-	MaxSlashCommandCCsPremium     = 10
-	MaxContextMenuCCs             = 1
-	MaxContextMenuCCsPremium      = 5
+	MaxSlashCommandCCs            = 10
+	MaxSlashCommandCCsPremium     = 50
+	MaxSubCommandCCs              = 10
+	MaxSubCommandCCsPremium       = 25
+	MaxContextMenuCCs             = 5
+	MaxContextMenuCCsPremium      = 15
 )
 
 // MaxSlashCommandForContext returns how many enabled slash command custom commands
@@ -969,6 +986,16 @@ func MaxSlashCommandForContext(guildID int64) int {
 		return MaxSlashCommandCCsPremium
 	}
 	return MaxSlashCommandCCs
+}
+
+// MaxSubCommandForContext returns how many subcommands a single slash command
+// custom command may have, depending on its premium status. Discord allows at
+// most 25 options per command, so the premium limit cannot be raised further.
+func MaxSubCommandForContext(guildID int64) int {
+	if isPremium, _ := premium.IsGuildPremium(guildID); isPremium {
+		return MaxSubCommandCCsPremium
+	}
+	return MaxSubCommandCCs
 }
 
 // MaxContextMenuForContext returns how many enabled context menu custom commands of

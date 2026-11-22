@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -36,7 +37,7 @@ type Handler struct {
 }
 
 type EventData struct {
-	EvtInterface      interface{}
+	EvtInterface      any
 	Type              Event
 	ctx               context.Context
 	Session           *discordgo.Session
@@ -59,7 +60,7 @@ func (e *EventData) Clone() *EventData {
 	}
 }
 
-func NewEventData(session *discordgo.Session, t Event, evtInterface interface{}) *EventData {
+func NewEventData(session *discordgo.Session, t Event, evtInterface any) *EventData {
 	return &EventData{
 		EvtInterface: evtInterface,
 		Type:         t,
@@ -227,15 +228,13 @@ func AddHandlerLegacy(p common.Plugin, handler HandlerFuncLegacy, order Order, e
 	}
 
 	// check if one of them is EventAll
-	for _, evt := range evts {
-		if evt == EventAll {
-			for _, e := range AllDiscordEvents {
-				handlers[e][int(order)] = append(handlers[e][int(order)], h)
-			}
-
-			// If one of the events is all, then there's not point in passing more
-			return
+	if slices.Contains(evts, EventAll) {
+		for _, e := range AllDiscordEvents {
+			handlers[e][int(order)] = append(handlers[e][int(order)], h)
 		}
+
+		// If one of the events is all, then there's not point in passing more
+		return
 	}
 
 	for _, evt := range evts {
@@ -266,15 +265,13 @@ func AddHandler(p common.Plugin, handler HandlerFunc, order Order, evts ...Event
 	}
 
 	// check if one of them is EventAll
-	for _, evt := range evts {
-		if evt == EventAll {
-			for _, e := range AllDiscordEvents {
-				handlers[e][int(order)] = append(handlers[e][int(order)], h)
-			}
-
-			// If one of the events is all, then there's not point in passing more
-			return
+	if slices.Contains(evts, EventAll) {
+		for _, e := range AllDiscordEvents {
+			handlers[e][int(order)] = append(handlers[e][int(order)], h)
 		}
+
+		// If one of the events is all, then there's not point in passing more
+		return
 	}
 
 	for _, evt := range evts {
@@ -297,7 +294,7 @@ func AddHandlerAsyncLast(p common.Plugin, handler HandlerFunc, evts ...Event) {
 	AddHandler(p, handler, OrderAsyncPostState, evts...)
 }
 
-func HandleEvent(s *discordgo.Session, evt interface{}) {
+func HandleEvent(s *discordgo.Session, evt any) {
 	var evtData = &EventData{
 		Session:      s,
 		EvtInterface: evt,
@@ -329,6 +326,18 @@ func QueueEventNonDiscord(evtData *EventData) {
 	queueEvent(evtData)
 }
 
+// droppableEvents are the only events thrown away when a shard's queue is full. they
+// are high volume and purely informational, so losing one costs nothing but slightly
+// stale presence or typing info.
+//
+// everything else has to be delivered. GuildCreate in particular is the only thing that
+// marks a guild available again after READY lists it as unavailable, so dropping one
+// leaves that guild unavailable in state until the next full reconnect.
+var droppableEvents = []Event{
+	EventPresenceUpdate,
+	EventTypingStart,
+}
+
 func queueEvent(evtData *EventData) {
 	s := evtData.Session
 	if s.ShardID >= len(workers) || workers[s.ShardID] == nil {
@@ -340,18 +349,89 @@ func queueEvent(evtData *EventData) {
 	case workers[s.ShardID] <- evtData:
 		return
 	default:
-		logrus.Errorf("Max events in queue: %d, %d", len(workers[s.ShardID]), s.ShardID)
-		guildID := int64(0)
-		if evtData.GS != nil {
-			guildID = evtData.GS.ID
-		}
-		if evtData.Type == EventPresenceUpdate {
-			logrus.Warningf("event queue is full, discarding presence update for guild: %d", guildID)
-			return
-		}
-		logrus.Warningf("excess event type: %s, sid: %d, guildID: %d, data: %#v", evtData.Type, s.ShardID, guildID, evtData.EvtInterface)
-		workers[s.ShardID] <- evtData // attempt to send it anyways for now
 	}
+
+	if slices.Contains(droppableEvents, evtData.Type) {
+		droppedEvents.record(evtData)
+		return
+	}
+
+	// this blocks the gateway reader for this shard until the worker catches up. the
+	// heartbeater and the writer run on their own goroutines, so the connection stays
+	// alive and this ends up as backpressure on the socket rather than a lost event.
+	blockedEvents.record(evtData)
+	workers[s.ShardID] <- evtData
+}
+
+type queuePressureKey struct {
+	shardID int
+	evt     Event
+}
+
+type queuePressureCounter struct {
+	mu     sync.Mutex
+	counts map[queuePressureKey]int64
+}
+
+func (c *queuePressureCounter) record(evtData *EventData) {
+	key := queuePressureKey{shardID: evtData.Session.ShardID, evt: evtData.Type}
+
+	c.mu.Lock()
+	c.counts[key]++
+	c.mu.Unlock()
+}
+
+func (c *queuePressureCounter) take() map[queuePressureKey]int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	snapshot := c.counts
+	c.counts = make(map[queuePressureKey]int64)
+	return snapshot
+}
+
+var (
+	droppedEvents = &queuePressureCounter{counts: make(map[queuePressureKey]int64)}
+	blockedEvents = &queuePressureCounter{counts: make(map[queuePressureKey]int64)}
+)
+
+func logQueuePressure(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	for range ticker.C {
+		logQueuePressureSnapshot("dropped", droppedEvents.take(), interval)
+		logQueuePressureSnapshot("waited to queue", blockedEvents.take(), interval)
+	}
+}
+
+func logQueuePressureSnapshot(what string, snapshot map[queuePressureKey]int64, interval time.Duration) {
+	if len(snapshot) < 1 {
+		return
+	}
+
+	total := int64(0)
+	perShard := make(map[int]int64, len(snapshot))
+	for key, count := range snapshot {
+		total += count
+		perShard[key.shardID] += count
+	}
+
+	worstShard, worstCount := 0, int64(-1)
+	for shardID, count := range perShard {
+		if count > worstCount {
+			worstShard, worstCount = shardID, count
+		}
+	}
+
+	var worstEvt Event
+	worstEvtCount := int64(-1)
+	for key, count := range snapshot {
+		if key.shardID == worstShard && count > worstEvtCount {
+			worstEvt, worstEvtCount = key.evt, count
+		}
+	}
+
+	logrus.Warnf("event queues full, %s %d events across %d shards in the last %s, worst shard %d with %d (mostly %s)",
+		what, total, len(perShard), interval, worstShard, worstCount, worstEvt)
 }
 
 // CS is the same as calling d.GS.GetChannel
@@ -398,6 +478,8 @@ func InitWorkers(totalShards int) {
 		workers[i] = make(chan *EventData, 1000)
 		go eventWorker(workers[i])
 	}
+
+	go logQueuePressure(time.Second * 10)
 }
 
 func eventWorker(ch chan *EventData) {

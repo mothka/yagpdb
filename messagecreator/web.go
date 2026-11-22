@@ -43,9 +43,10 @@ func (p *Plugin) InitWeb() {
 	web.AddHTMLTemplate("messagecreator/assets/messagecreator.html", PageHTML)
 
 	web.AddSidebarItem(web.SidebarCategoryTools, &web.SidebarItem{
-		Name: "Message Creator",
-		URL:  "messagecreator",
-		Icon: "fas fa-paper-plane",
+		Name:     "Message Creator",
+		URL:      "messagecreator",
+		Icon:     "fas fa-paper-plane",
+		NewUntil: time.Date(2027, time.February, 1, 0, 0, 0, 0, time.UTC),
 	})
 
 	muxer := goji.SubMux()
@@ -70,6 +71,13 @@ func handleGetCreator(w http.ResponseWriter, r *http.Request) (web.TemplateData,
 	return tmpl, nil
 }
 
+func mentionSettingsFromForm(r *http.Request) MentionSettings {
+	return MentionSettings{
+		AllowRoleMentions:     r.FormValue("allow_role_mentions") != "",
+		AllowEveryoneMentions: r.FormValue("allow_everyone_mentions") != "",
+	}
+}
+
 func handleSend(w http.ResponseWriter, r *http.Request) (web.TemplateData, error) {
 	ctx := r.Context()
 	activeGuild, tmpl := web.GetBaseCPContextData(ctx)
@@ -92,10 +100,10 @@ func handleSend(w http.ResponseWriter, r *http.Request) (web.TemplateData, error
 	}
 
 	if !allowAction(ctx, activeGuild.ID) {
-		return tmpl.AddAlerts(web.ErrorAlert("You're doing that too fast — you can send or edit at most one message per minute.")), nil
+		return tmpl.AddAlerts(web.ErrorAlert("You're doing that too fast - you can send or edit at most one message per minute.")), nil
 	}
 
-	req := &SendRequest{ChannelID: channelID, Mode: mode, Payload: json.RawMessage(payload)}
+	req := &SendRequest{ChannelID: channelID, Mode: mode, Payload: json.RawMessage(payload), Mentions: mentionSettingsFromForm(r)}
 	err := internalapi.PostWithGuild(activeGuild.ID, fmt.Sprintf("%d/messagecreator/send", activeGuild.ID), req, nil)
 	if err != nil {
 		return tmpl.AddAlerts(web.ErrorAlert("Failed to send message: " + err.Error())), nil
@@ -133,10 +141,10 @@ func handleEdit(w http.ResponseWriter, r *http.Request) (web.TemplateData, error
 	}
 
 	if !allowAction(ctx, activeGuild.ID) {
-		return tmpl.AddAlerts(web.ErrorAlert("You're doing that too fast — you can send or edit at most one message per minute.")), nil
+		return tmpl.AddAlerts(web.ErrorAlert("You're doing that too fast - you can send or edit at most one message per minute.")), nil
 	}
 
-	req := &EditRequest{ChannelID: channelID, MessageID: messageID, Mode: mode, Payload: json.RawMessage(payload)}
+	req := &EditRequest{ChannelID: channelID, MessageID: messageID, Mode: mode, Payload: json.RawMessage(payload), Mentions: mentionSettingsFromForm(r)}
 	err = internalapi.PostWithGuild(activeGuild.ID, fmt.Sprintf("%d/messagecreator/edit", activeGuild.ID), req, nil)
 	if err != nil {
 		return tmpl.AddAlerts(web.ErrorAlert("Failed to edit message: " + err.Error())), nil

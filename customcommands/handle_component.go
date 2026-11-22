@@ -39,15 +39,9 @@ func handleInteractionCreate(evt *eventsystem.EventData) {
 		return
 	}
 
-	cState := evt.GS.GetChannelOrThread(interaction.ChannelID)
+	var cState *dstate.ChannelState
+	evt.GS, cState = bot.InteractionChannel(evt.GS, interaction.Interaction)
 	if cState == nil {
-		return
-	}
-
-	// Slash command interactions carry no source message, so handle them before the
-	// message/member guard below that the component & modal paths rely on.
-	if interaction.Type == discordgo.InteractionApplicationCommand {
-		handleSlashCommandInteraction(evt, cState, &interaction)
 		return
 	}
 
@@ -58,12 +52,20 @@ func handleInteractionCreate(evt *eventsystem.EventData) {
 		return
 	}
 
-	// Ephemeral messages always have guild_id = 0 even if created in a guild channel;
-	// see https://github.com/discord/discord-api-docs/issues/4557. But exec/execAdmin
-	// rely on the guild ID of the message to fill guild data, so patch it here.
+	// Interaction members never carry guild_id, and ephemeral messages always have
+	// guild_id = 0 even if created in a guild channel;
+	// see https://github.com/discord/discord-api-docs/issues/4557. Role functions and
+	// exec/execAdmin rely on these guild IDs, so patch them here.
 	interaction.Member.GuildID = evt.GS.ID
 	if interaction.Message != nil {
 		interaction.Message.GuildID = evt.GS.ID
+	}
+
+	// Slash command interactions carry no source message, so handle them before the
+	// message guard below that the component & modal paths rely on.
+	if interaction.Type == discordgo.InteractionApplicationCommand {
+		handleSlashCommandInteraction(evt, cState, &interaction)
+		return
 	}
 
 	switch interaction.Type {
@@ -182,6 +184,7 @@ func deferResponseToCCs(interaction *templates.CustomCommandInteraction, ccs []*
 		err := common.BotSession.CreateInteractionResponse(interaction.ID, interaction.Token, def)
 		if err != nil {
 			logger.WithField("guild", interaction.GuildID).WithError(err).Error("Error deferring response")
+			return
 		}
 		interaction.RespondedTo = true
 		interaction.Deferred = true
@@ -191,7 +194,7 @@ func deferResponseToCCs(interaction *templates.CustomCommandInteraction, ccs []*
 var cachedCommandsComponentTrigger = common.CacheSet.RegisterSlot("custom_commands_component_trigger", nil, int64(0))
 
 func BotCachedGetCommandsWithComponentTrigger(guildID int64, ctx context.Context) ([]*models.CustomCommand, error) {
-	v, err := cachedCommandsComponentTrigger.GetCustomFetch(guildID, func(key interface{}) (interface{}, error) {
+	v, err := cachedCommandsComponentTrigger.GetCustomFetch(guildID, func(key any) (any, error) {
 		var cmds []*models.CustomCommand
 		var err error
 		common.LogLongCallTime(time.Second, true, "Took longer than a second to fetch custom commands from db", logrus.Fields{"guild": guildID}, func() {

@@ -5,6 +5,7 @@ package serverstats
 import (
 	"context"
 	"database/sql"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +31,10 @@ func (p *Plugin) PluginInfo() *common.PluginInfo {
 	}
 }
 
+func (p *Plugin) IsActive() bool {
+	return !confDeprecated.GetBool() && os.Getenv("YAGPDB_SERVERSTATS_DISABLE_SERVERSTATS") == ""
+}
+
 var logger = common.GetPluginLogger(&Plugin{})
 
 func RegisterPlugin() {
@@ -52,8 +57,8 @@ type ServerStatsConfig struct {
 }
 
 func (s *ServerStatsConfig) ParseChannels() {
-	split := strings.Split(s.IgnoreChannels, ",")
-	for _, v := range split {
+	split := strings.SplitSeq(s.IgnoreChannels, ",")
+	for v := range split {
 		parsed, err := strconv.ParseInt(v, 10, 64)
 		if err == nil {
 			s.ParsedChannels = append(s.ParsedChannels, parsed)

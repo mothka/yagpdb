@@ -2,9 +2,10 @@ package verification
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,7 +25,6 @@ import (
 	"github.com/botlabs-gg/yagpdb/v2/lib/dstate"
 	"github.com/botlabs-gg/yagpdb/v2/moderation"
 	"github.com/botlabs-gg/yagpdb/v2/verification/models"
-	"github.com/botlabs-gg/yagpdb/v2/web"
 	"github.com/mediocregopher/radix/v3"
 	"github.com/volatiletech/sqlboiler/v4/boil"
 	"github.com/volatiletech/sqlboiler/v4/queries/qm"
@@ -79,10 +79,16 @@ func addMemberToVerificationPendingSet(guildID int64, userID int64) {
 	}
 }
 
+// RandStringRunes returns a random string of letters, from a cryptographically
+// secure source as it is used for verification tokens.
 func RandStringRunes(n int) string {
 	b := make([]rune, n)
 	for i := range b {
-		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(letterRunes))))
+		if err != nil {
+			panic(err)
+		}
+		b[i] = letterRunes[idx.Int64()]
 	}
 	return string(b)
 }
@@ -172,7 +178,8 @@ func (p *Plugin) handleMemberUpdate(evt *eventsystem.EventData) {
 
 func (p *Plugin) createVerificationSession(userID, guildID int64) (string, error) {
 	for {
-		token := RandStringRunes(32)
+		// 16 letters is about 91 bits, plenty for a link that is only valid until solved.
+		token := RandStringRunes(16)
 		model := &models.VerificationSession{
 			Token:     token,
 			UserID:    userID,
@@ -226,16 +233,7 @@ func (p *Plugin) startVerificationProcess(conf *models.VerificationConfig, guild
 		return
 	}
 
-	cs := dstate.ChannelStateFromDgo(channel)
-
-	tmplCTX := templates.NewContext(gs, &cs, ms)
-	tmplCTX.Name = "dm_verification_message"
-	tmplCTX.Data["Link"] = fmt.Sprintf("%s/public/%d/verify/%d/%s", web.BaseURL(), guildID, target.ID, token)
-
-	err = tmplCTX.ExecuteAndSendWithErrors(msg, channel.ID)
-	if err != nil {
-		logger.WithError(err).WithField("guild", gs.ID).WithField("user", ms.User.ID).Error("failed sending verification dm message")
-	}
+	p.sendVerificationDM(conf, gs, ms, channel, "dm_verification_message", msg, token)
 
 	evt := &VerificationEventData{
 		UserID: target.ID,
@@ -257,8 +255,8 @@ func (p *Plugin) startVerificationProcess(conf *models.VerificationConfig, guild
 	p.logAction(guildID, conf.LogChannel, target, "New user joined waiting to be verified as a human", 0x47aaed)
 }
 
-func ScheduledEventMW(innerHandler func(ms *dstate.MemberState, guildID int64, conf *models.VerificationConfig, rawData interface{}) (bool, error)) func(evt *seventsmodels.ScheduledEvent, data interface{}) (retry bool, err error) {
-	return func(evt *seventsmodels.ScheduledEvent, data interface{}) (retry bool, err error) {
+func ScheduledEventMW(innerHandler func(ms *dstate.MemberState, guildID int64, conf *models.VerificationConfig, rawData any) (bool, error)) func(evt *seventsmodels.ScheduledEvent, data any) (retry bool, err error) {
+	return func(evt *seventsmodels.ScheduledEvent, data any) (retry bool, err error) {
 
 		userID := int64(0)
 
@@ -290,7 +288,7 @@ func ScheduledEventMW(innerHandler func(ms *dstate.MemberState, guildID int64, c
 
 }
 
-func (p *Plugin) handleUserVerifiedScheduledEvent(ms *dstate.MemberState, guildID int64, conf *models.VerificationConfig, rawData interface{}) (retry bool, err error) {
+func (p *Plugin) handleUserVerifiedScheduledEvent(ms *dstate.MemberState, guildID int64, conf *models.VerificationConfig, rawData any) (retry bool, err error) {
 	err = common.BotSession.GuildMemberRoleAdd(guildID, ms.User.ID, conf.VerifiedRole)
 	if err != nil {
 		return scheduledevents2.CheckDiscordErrRetry(err), err
@@ -438,7 +436,7 @@ func (p *Plugin) CheckBanned(guildID int64, users []*discordgo.User) (*discordgo
 	return nil, nil
 }
 
-func (p *Plugin) handleWarnUserVerification(ms *dstate.MemberState, guildID int64, conf *models.VerificationConfig, rawData interface{}) (retry bool, err error) {
+func (p *Plugin) handleWarnUserVerification(ms *dstate.MemberState, guildID int64, conf *models.VerificationConfig, rawData any) (retry bool, err error) {
 	if p.checkMemberAlreadyVerified(ms, conf) {
 		return false, nil
 	}
@@ -478,21 +476,47 @@ func (p *Plugin) sendWarning(ms *dstate.MemberState, gs *dstate.GuildSet, token 
 	if err != nil {
 		return err
 	}
-	cs := dstate.ChannelStateFromDgo(channel)
-
-	tmplCTX := templates.NewContext(gs, &cs, ms)
-	tmplCTX.Name = "warn message"
-	tmplCTX.Data["Link"] = fmt.Sprintf("%s/public/%d/verify/%d/%s", web.BaseURL(), gs.ID, ms.User.ID, token)
-
-	err = tmplCTX.ExecuteAndSendWithErrors(msg, channel.ID)
-	if err != nil {
-		logger.WithError(err).WithField("guild", gs.ID).WithField("user", ms.User.ID).Error("failed sending warning message")
-	}
-
+	p.sendVerificationDM(conf, gs, ms, channel, "warn message", msg, token)
 	return nil
 }
 
-func (p *Plugin) handleKickUser(ms *dstate.MemberState, guildID int64, conf *models.VerificationConfig, rawData interface{}) (retry bool, err error) {
+// sendVerificationDM executes the template, falling back to the default dm
+// if it fails, so a broken template cannot keep a user from getting the link.
+func (p *Plugin) sendVerificationDM(conf *models.VerificationConfig, gs *dstate.GuildSet, ms *dstate.MemberState, channel *discordgo.Channel, name, source, token string) {
+	cs := dstate.ChannelStateFromDgo(channel)
+	newContext := func() *templates.Context {
+		tmplCTX := templates.NewContext(gs, &cs, ms)
+		tmplCTX.Name = name
+		tmplCTX.Data["Link"] = VerifyPageURL(token)
+		return tmplCTX
+	}
+
+	tmplCTX := newContext()
+	out, err := tmplCTX.Execute(source)
+	if err != nil && source != DefaultDMMessage && !common.IsDiscordErr(err, discordgo.ErrCodeCannotSendMessagesToThisUser) {
+		logger.WithError(err).WithField("guild", gs.ID).WithField("user", ms.User.ID).Warnf("failed executing verification %s, sending the default", name)
+		p.logAction(gs.ID, conf.LogChannel, &ms.User, fmt.Sprintf("Failed executing the %s template, sent the default verification message instead.\nError: `%v`", name, err), 0xff8228)
+
+		tmplCTX = newContext()
+		out, err = tmplCTX.Execute(DefaultDMMessage)
+	}
+
+	if err != nil {
+		logger.WithError(err).WithField("guild", gs.ID).WithField("user", ms.User.ID).Errorf("failed sending verification %s", name)
+		return
+	}
+
+	out = strings.TrimSpace(out)
+	if utf8.RuneCountInString(out) > 2000 {
+		out = "Template output for " + name + " was longer than 2k (contact an admin on the server...)"
+	}
+
+	if _, err := tmplCTX.SendResponse(out); err != nil {
+		logger.WithError(err).WithField("guild", gs.ID).WithField("user", ms.User.ID).Errorf("failed sending verification %s", name)
+	}
+}
+
+func (p *Plugin) handleKickUser(ms *dstate.MemberState, guildID int64, conf *models.VerificationConfig, rawData any) (retry bool, err error) {
 	if p.checkMemberAlreadyVerified(ms, conf) {
 		return false, nil
 	}

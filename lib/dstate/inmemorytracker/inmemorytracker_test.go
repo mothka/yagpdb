@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/botlabs-gg/yagpdb/v2/lib/discordgo"
+	"github.com/botlabs-gg/yagpdb/v2/lib/dstate"
 )
 
 var testSession = &discordgo.Session{ShardID: 0, ShardCount: 1}
@@ -108,8 +109,13 @@ func TestGuildCreate(t *testing.T) {
 		t.Fatal("gs is nil")
 	}
 
-	if gs.GetRole(initialTestRoleID) == nil {
+	role := gs.GetRole(initialTestRoleID)
+	if role == nil {
 		t.Fatal("gc role is nil")
+	}
+
+	if role.GuildID != initialTestGuildID {
+		t.Fatalf("role guild id not set: %d", role.GuildID)
 	}
 
 	if gs.GetChannel(initialTestChannelID) == nil {
@@ -118,6 +124,53 @@ func TestGuildCreate(t *testing.T) {
 
 	if gs.GetThread(intialTestThreadID) == nil {
 		t.Fatal("thread not found")
+	}
+}
+
+// presences and members are paired up by user id, and only some members in a guild
+// create are online, so the two lists rarely line up
+func TestGuildCreatePresenceMatching(t *testing.T) {
+	const guildID = 2
+	online := []int64{2001, 2003}
+
+	tracker := NewInMemoryTracker(TrackerConfig{}, 1)
+	tracker.HandleEvent(testSession, &discordgo.GuildCreate{
+		Guild: &discordgo.Guild{
+			ID:          guildID,
+			Name:        "presence test guild",
+			MemberCount: 3,
+			Members: []*discordgo.Member{
+				createTestMember(guildID, 2001, nil),
+				createTestMember(guildID, 2002, nil),
+				createTestMember(guildID, 2003, nil),
+			},
+			// deliberately out of order, and missing the offline member
+			Presences: []*discordgo.Presence{
+				{User: createTestUser(2003)},
+				{User: createTestUser(2001)},
+			},
+		},
+	})
+
+	for _, id := range online {
+		ms := tracker.GetMember(guildID, id)
+		if ms == nil {
+			t.Fatalf("member %d is missing", id)
+		}
+		if ms.Presence == nil {
+			t.Fatalf("member %d should have a presence", id)
+		}
+		if ms.User.ID != id {
+			t.Fatalf("member %d got the wrong user %d", id, ms.User.ID)
+		}
+	}
+
+	offline := tracker.GetMember(guildID, 2002)
+	if offline == nil {
+		t.Fatal("offline member is missing")
+	}
+	if offline.Presence != nil {
+		t.Fatal("offline member should not have picked up a presence")
 	}
 }
 
@@ -194,6 +247,10 @@ func TestRoleUpdate(t *testing.T) {
 
 	if role.Name != updt.Role.Name {
 		t.Fatalf("role was not updated: name: %s", role.Name)
+	}
+
+	if role.GuildID != initialTestGuildID {
+		t.Fatalf("updated role guild id not set: %d", role.GuildID)
 	}
 }
 
@@ -310,5 +367,80 @@ func TestThreadParentPerms(t *testing.T) {
 	thread = tracker.GetGuild(initialTestGuildID).GetThread(testThreadID)
 	if thread != nil {
 		t.Fatal("thread should have been removed")
+	}
+}
+
+func TestThreadListSyncDoesNotGrowThreads(t *testing.T) {
+	tracker := createTestState(TrackerConfig{})
+	const otherChannelID = 9001
+
+	for range 10 {
+		tracker.HandleEvent(testSession, &discordgo.ThreadListSync{
+			GuildID:  initialTestGuildID,
+			Channels: discordgo.IDSlice{otherChannelID},
+		})
+	}
+
+	threads := tracker.GetGuild(initialTestGuildID).Threads
+	if len(threads) != 1 || threads[0].ID != intialTestThreadID {
+		t.Fatalf("syncing an unrelated channel must keep the existing thread only, got %d threads", len(threads))
+	}
+}
+
+func TestThreadListSyncReplacesSyncedThreads(t *testing.T) {
+	tracker := createTestState(TrackerConfig{})
+	synced := &discordgo.Channel{
+		ID:             testThreadID,
+		GuildID:        initialTestGuildID,
+		ParentID:       initialTestChannelID,
+		Type:           discordgo.ChannelTypeGuildPublicThread,
+		ThreadMetadata: &discordgo.ThreadMetadata{},
+	}
+
+	tracker.HandleEvent(testSession, &discordgo.ThreadListSync{
+		GuildID:  initialTestGuildID,
+		Channels: discordgo.IDSlice{initialTestChannelID},
+		Threads:  []*discordgo.Channel{synced},
+	})
+
+	threads := tracker.GetGuild(initialTestGuildID).Threads
+	if len(threads) != 1 || threads[0].ID != testThreadID {
+		t.Fatalf("threads of a synced channel must be replaced by the synced list, got %+v", threads)
+	}
+}
+
+func TestThreadListSyncWithoutChannelsReplacesAllThreads(t *testing.T) {
+	tracker := createTestState(TrackerConfig{})
+	synced := &discordgo.Channel{
+		ID:             testThreadID,
+		GuildID:        initialTestGuildID,
+		ParentID:       initialTestChannelID,
+		Type:           discordgo.ChannelTypeGuildPublicThread,
+		ThreadMetadata: &discordgo.ThreadMetadata{},
+	}
+
+	for range 3 {
+		tracker.HandleEvent(testSession, &discordgo.ThreadListSync{
+			GuildID: initialTestGuildID,
+			Threads: []*discordgo.Channel{synced},
+		})
+	}
+
+	threads := tracker.GetGuild(initialTestGuildID).Threads
+	if len(threads) != 1 || threads[0].ID != testThreadID {
+		t.Fatalf("a sync without channel ids covers the whole guild and must replace every thread, got %d threads", len(threads))
+	}
+}
+
+func TestSetGuildSetsRoleGuild(t *testing.T) {
+	tracker := NewInMemoryTracker(TrackerConfig{}, 1)
+	tracker.SetGuild(&dstate.GuildSet{
+		GuildState: dstate.GuildState{ID: initialTestGuildID},
+		Roles:      []discordgo.Role{{ID: initialTestRoleID}},
+	})
+
+	role := tracker.GetGuild(initialTestGuildID).GetRole(initialTestRoleID)
+	if role == nil || role.GuildID != initialTestGuildID {
+		t.Fatalf("expected restored roles to have their guild set, got %+v", role)
 	}
 }

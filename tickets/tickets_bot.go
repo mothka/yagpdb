@@ -314,14 +314,14 @@ func handleButton(evt *eventsystem.EventData, ic *discordgo.InteractionCreate, m
 				Data: &discordgo.InteractionResponseData{
 					Title:    "Create a Ticket",
 					CustomID: "tickets-open-modal",
-					Components: []discordgo.TopLevelComponent{discordgo.ActionsRow{
-						Components: []discordgo.InteractiveComponent{discordgo.TextInput{
+					Components: []discordgo.TopLevelComponent{discordgo.Label{
+						Label: "Reason for opening",
+						Component: discordgo.TextInput{
 							CustomID:  "reason",
-							Label:     "Reason for opening",
 							Style:     discordgo.TextInputShort,
 							Required:  true,
 							MaxLength: 90,
-						}},
+						},
 					}},
 				},
 			}
@@ -374,14 +374,14 @@ func handleButton(evt *eventsystem.EventData, ic *discordgo.InteractionCreate, m
 			Data: &discordgo.InteractionResponseData{
 				Title:    "Close Ticket",
 				CustomID: "tickets-close-modal",
-				Components: []discordgo.TopLevelComponent{discordgo.ActionsRow{
-					Components: []discordgo.InteractiveComponent{discordgo.TextInput{
+				Components: []discordgo.TopLevelComponent{discordgo.Label{
+					Label: "Reason for closing",
+					Component: discordgo.TextInput{
 						CustomID:  "reason",
-						Label:     "Reason for closing",
 						Style:     discordgo.TextInputShort,
 						Required:  true,
 						MaxLength: 90,
-					}},
+					},
 				}},
 			},
 		}
@@ -399,7 +399,7 @@ func handleModal(evt *eventsystem.EventData, ic *discordgo.InteractionCreate, me
 		},
 	}
 	var err error
-	value := interaction.Components[0].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
+	value, _ := interaction.TextInputValue("reason")
 
 	switch {
 	case strings.Contains(interaction.CustomID, "open"):
@@ -469,6 +469,10 @@ func (p *Plugin) handleInteractionCreate(evt *eventsystem.EventData) (retry bool
 	}
 
 	evt.GS = bot.State.GetGuild(ic.GuildID)
+	if evt.GS == nil {
+		return false, nil
+	}
+
 	conf, err := models.FindTicketConfigG(evt.Context(), ic.GuildID)
 	if err != nil {
 		if err != sql.ErrNoRows {
@@ -498,7 +502,11 @@ func (p *Plugin) handleInteractionCreate(evt *eventsystem.EventData) (retry bool
 		},
 	}
 
-	var currentChannel *dstate.ChannelState = evt.GS.GetChannelOrThread(ic.ChannelID)
+	var currentChannel *dstate.ChannelState
+	evt.GS, currentChannel = bot.InteractionChannel(evt.GS, &ic.Interaction)
+	if currentChannel == nil {
+		return false, nil
+	}
 
 	switch ic.Type {
 	case discordgo.InteractionMessageComponent:
@@ -509,6 +517,9 @@ func (p *Plugin) handleInteractionCreate(evt *eventsystem.EventData) (retry bool
 
 	if err != nil {
 		response = errorResponse
+		if restErr, ok := errors.Cause(err).(*discordgo.RESTError); ok && restErr.Response != nil && restErr.Response.StatusCode == 403 && restErr.Message != nil {
+			response.Data.Content = "I am missing permissions to run this ticket action, Discord responded with: " + restErr.Message.Message
+		}
 	}
 
 	if response.Data.Content == "" && len(response.Data.Components) == 0 {

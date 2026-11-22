@@ -4,6 +4,7 @@
 
 <div class="page-header">
     <h2>Tickets</h2>
+    {{template "cp_docs_link" "tools-and-utilities/tickets"}}
 </div>
 
 {{template "cp_alerts" .}}
@@ -24,7 +25,7 @@
                                 which then only your staff and other ticket participants can interact with.</p>
                             <p>The flow goes like this:</p>
                             <ol>
-                                <li>User opens a ticket using <code>-ticket open (reason-here)</code></li>
+                                <li>User opens a ticket using <code>/tickets open (reason-here)</code></li>
                                 <li>A new channel gets made in the open tickets category</li>
                                 <li>Permissions on that channel is set so that only ticket participants get access</li>
                                 <li>User can also add more people to the ticket</li>
@@ -34,7 +35,7 @@
                                     channel (specified below)</li>
                                 <li>Channel gets deleted</li>
                             </ol>
-                            <p>There's more functionality here that's not mentioned, use <code>-help ticket</code> for
+                            <p>There's more functionality here that's not mentioned, use <code>/help tickets</code> for
                                 all the commands.<br>
                                 More functionality is also planned, such as adding a interface on the website so that it
                                 can be used for things like ban appeals.</p>
@@ -101,7 +102,7 @@
                             {{checkbox "TicketsUseTXTTranscripts" "tickets-create-transcripts-checkbox2" `Create .txt transcripts when tickets close` .PluginSettings.TicketsUseTXTTranscripts}}
                             {{checkbox "DownloadAttachments" "tickets-download-att-checkbox2" `Download and archive attachments when closing the ticket` .PluginSettings.DownloadAttachments}}
                             <div class="form-group">
-                                <label>Opening message in new tickets</label>
+                                <label>New ticket message</label>
                                 {{template "codemirror_toggle"}}
                                 <textarea rows="5" class="form-control template-editor" name="TicketOpenMSG"
                                     placeholder="{{.DefaultTicketMessage}}">{{or .PluginSettings.TicketOpenMSG .DefaultTicketMessage}}</textarea>

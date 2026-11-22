@@ -15,7 +15,6 @@ var Command = &commands.YAGCommand{
 	HideFromCommandsPage: true,
 	Name:                 "setstatus",
 	Description:          "Sets the bot's presence type, status text, online status, and optional streaming URL. Bot Admin Only",
-	HideFromHelp:         true,
 	Arguments: []*dcmd.ArgDef{
 		{Name: "status", Type: dcmd.String, Default: ""},
 	},
@@ -24,7 +23,7 @@ var Command = &commands.YAGCommand{
 		{Name: "type", Type: dcmd.String, Help: "Set activity type. Allowed values are 'playing', 'streaming', 'listening', 'watching', 'custom', 'competing'. Defaults to custom status", Default: "custom"},
 		{Name: "status", Type: dcmd.String, Help: "Set online status. Allowed values are 'online', 'idle', 'dnd', 'offline'. Defaults to online", Default: "online"},
 	},
-	RunFunc: util.RequireBotAdmin(func(data *dcmd.Data) (interface{}, error) {
+	RunFunc: util.RequireBotAdmin(func(data *dcmd.Data) (any, error) {
 		activityType := data.Switch("type").Str()
 		statusType := data.Switch("status").Str()
 		statusText := data.Args[0].Str()

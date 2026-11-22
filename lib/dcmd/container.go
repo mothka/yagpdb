@@ -11,7 +11,7 @@ import (
 )
 
 type MiddleWareFunc func(next RunFunc) RunFunc
-type RunFunc func(data *Data) (interface{}, error)
+type RunFunc func(data *Data) (any, error)
 
 // Container is the standard muxer
 // Containers can be nested by calling Container.Sub(...)
@@ -66,7 +66,7 @@ func (c *Container) Descriptions(data *Data) (string, string) {
 	return c.Description, c.LongDescription
 }
 
-func (c *Container) Run(data *Data) (interface{}, error) {
+func (c *Container) Run(data *Data) (any, error) {
 
 	var matchingCmd *RegisteredCommand
 
@@ -76,7 +76,7 @@ func (c *Container) Run(data *Data) (interface{}, error) {
 		depth := len(data.ContainerChain)
 		options := data.SlashCommandTriggerData.Interaction.DataCommand.Options
 		name := data.SlashCommandTriggerData.Interaction.DataCommand.Name
-		for i := 0; i < depth; i++ {
+		for range depth {
 			if options[0] == nil {
 				return nil, errors.New("options is nil")
 			}
@@ -189,10 +189,17 @@ func (c *Container) FindCommand(searchStr string) (cmd *RegisteredCommand, rest 
 		return
 	}
 
+	var defaultCmd *RegisteredCommand
+
 	// Start looking for matches in all subcommands
 	for _, c := range c.Commands {
 		names := c.Trigger.Names
 		for _, name := range names {
+			if name == "" {
+				defaultCmd = c
+				continue
+			}
+
 			if !strings.EqualFold(name, split[0]) {
 				continue
 			}
@@ -203,6 +210,12 @@ func (c *Container) FindCommand(searchStr string) (cmd *RegisteredCommand, rest 
 
 			return
 		}
+	}
+
+	// Nothing matched the first word, so hand the whole thing to the subcommand
+	// registered under the empty name, if the container has one.
+	if defaultCmd != nil {
+		return defaultCmd, searchStr
 	}
 
 	// No command found
@@ -266,7 +279,7 @@ func (c *Container) AddCommand(cmd Cmd, trigger *Trigger) *RegisteredCommand {
 	return wrapped
 }
 
-func (c *Container) AddMidlewares(mw ...MiddleWareFunc) {
+func (c *Container) AddMiddlewares(mw ...MiddleWareFunc) {
 	c.middlewares = append(c.middlewares, mw...)
 }
 

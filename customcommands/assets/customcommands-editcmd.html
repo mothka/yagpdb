@@ -22,21 +22,27 @@
                                                             <option value="mentionable" {{if eq .Opt.TypeKey "mentionable"}}selected{{end}}>Mentionable</option>
                                                         </select>
                                                     </div>
-                                                    <div class="col-12 col-md-4 mb-2 mb-md-0">
+                                                    <div class="col-12 col-md-3 mb-2 mb-md-0">
                                                         <label class="small mb-1">Description</label>
                                                         <input type="text" class="form-control" data-slash-field="description" name="{{.Prefix}}.description" maxlength="100" placeholder="description" value="{{.Opt.Description}}">
                                                     </div>
                                                     <div class="col-6 col-md-2 mb-2 mb-md-0">
-                                                        {{checkbox (printf "%s.required" .Prefix) .ReqID "Required" .Opt.Required "data-slash-field=required"}}
+                                                        <div class="form-group d-flex align-items-center mb-0 slash-option-required">
+                                                            <input type="checkbox" class="tgl tgl-flat tgl-sm" data-slash-field="required" name="{{.Prefix}}.required" id="{{.ReqID}}" {{if .Opt.Required}}checked{{end}}>
+                                                            <label class="tgl-btn mb-0" for="{{.ReqID}}"></label>
+                                                            <span class="tgl-desc ml-2">Required</span>
+                                                        </div>
                                                     </div>
-                                                    <div class="col-6 col-md-1 text-right">
-                                                        <button type="button" class="btn btn-danger btn-sm slash-option-remove" title="Remove argument"><i class="fas fa-minus"></i></button>
+                                                    <div class="col-6 col-md-2 text-right text-nowrap">
+                                                        <button type="button" class="btn btn-default btn-sm slash-option-move-up" title="Move up"><i class="fas fa-arrow-up"></i></button>
+                                                        <button type="button" class="btn btn-default btn-sm slash-option-move-down" title="Move down"><i class="fas fa-arrow-down"></i></button>
+                                                        <button type="button" class="btn btn-danger btn-sm slash-option-remove" title="Remove option"><i class="fas fa-minus"></i></button>
                                                     </div>
                                                 </div>
                                                 <div class="form-row slash-opt-extra-choices mt-2 {{if and (ne .Opt.TypeKey "string_menu") (ne .Opt.TypeKey "integer_menu") (ne .Opt.TypeKey "number_menu")}}hidden{{end}}">
                                                     <div class="col-12">
-                                                        <label class="small mb-1">Choices - one per line (turns this into a dropdown / select menu). For Integer/Number arguments each line must be a number.</label>
-                                                        <textarea class="form-control" data-slash-field="choices" name="{{.Prefix}}.choices" rows="3" placeholder="Leave empty for free input">{{range .Opt.Choices}}{{.}}
+                                                        <label class="small mb-1">Choices - one per line (max 25). For Integer/Number options each line must be a number.</label>
+                                                        <textarea class="form-control" data-slash-field="choices" name="{{.Prefix}}.choices" rows="3" placeholder="One choice per line">{{range .Opt.Choices}}{{.}}
 {{end}}</textarea>
                                                     </div>
                                                 </div>
@@ -82,10 +88,12 @@
 {{template "cp_head" .}}
 <header class="page-header">
     <h2>Editing Custom Command #{{.CC.LocalID}}</h2>
+    {{template "cp_docs_link" "custom-commands/commands"}}
 </header>
 
 {{template "cp_alerts" .}}
 
+{{if .CC}}
 <style>
     .cc-editor {
       font-family: Consolas, monospace;
@@ -174,19 +182,12 @@
                                                 onchange="triggerTypeChanged(this)">
                                                 <option value="none" {{if eq .CC.TriggerType 10}}selected{{end}}>None
                                                 </option>
-                                                <option value="cmd" {{if eq .CC.TriggerType 0}} selected{{end}}>Command
-                                                    (mention/cmd
-                                                    prefix)</option>
-                                                <option value="prefix" {{if eq .CC.TriggerType 1}} selected{{end}}>
-                                                    Starts with</option>
-                                                <option value="contains" {{if eq .CC.TriggerType 2}} selected{{end}}>
-                                                    Contains</option>
-                                                <option value="regex" {{if eq .CC.TriggerType 3}} selected{{end}}>Regex
-                                                </option>
-                                                <option value="exact" {{if eq .CC.TriggerType 4}} selected{{end}}>Exact
-                                                    match</option>
-                                                <option value="reaction" {{if eq .CC.TriggerType 6}} selected{{end}}>
-                                                    Reaction</option>
+                                                <option value="cmd" {{if eq .CC.TriggerType 0}} selected{{end}}>Command</option>
+                                                <option value="prefix" {{if eq .CC.TriggerType 1}} selected{{end}}>Starts with</option>
+                                                <option value="contains" {{if eq .CC.TriggerType 2}} selected{{end}}>Contains</option>
+                                                <option value="regex" {{if eq .CC.TriggerType 3}} selected{{end}}>Regex</option>
+                                                <option value="exact" {{if eq .CC.TriggerType 4}} selected{{end}}>Exact match</option>
+                                                <option value="reaction" {{if eq .CC.TriggerType 6}} selected{{end}}>Reaction</option>
                                                 <option value="interval_hours"
                                                     {{if eq (call .GetCCIntervalType .CC) 1}}selected{{end}}>
                                                     Hourly interval
@@ -255,7 +256,7 @@
                                             The command will run when a role is assigned to or removed from a member,
                                             <b>has a cooldown of 5 minutes per user-role combination, reduced to 1 minute for premium servers</b>
                                             The user who got the role available as <code>.TargetUser</code> and <code>.TargetMember</code>, and the user who gave the role is available as <code>.Author</code>
-                                            The role given is availabe in <code>.Role</code>
+                                            The role given is available in <code>.Role</code>
                                         </small>
                                         <small id="trigger-desc-slash_command">
                                             Creates a Slash command, trigger name must not be same as an inbuilt slash command.
@@ -463,7 +464,7 @@
                                         </div>
                                         <button type="button" id="slash-option-add" class="btn btn-success btn-sm mt-1"><i class="fas fa-plus"></i> Add Option</button>
                                         <small id="slash-option-limit-msg" class="form-text text-muted hidden">You've reached a maximum of 25 options.</small>
-                                        <small class="form-text text-muted">Required Options are automatically ordered before optional ones by discord</small>
+                                        <small class="form-text text-muted">Required options are always placed before optional ones; the order you set is kept within each group.</small>
                                         </div>
                                     </div>
                                 </div>
@@ -502,12 +503,12 @@
                                             </div>
                                             {{end}}
                                         </div>
-                                        <button type="button" id="slash-subcommand-add" class="btn btn-success btn-sm mt-1" data-limit="{{if .IsGuildPremium}}10{{else}}3{{end}}"><i class="fas fa-plus"></i> Add Subcommand</button>
+                                        <button type="button" id="slash-subcommand-add" class="btn btn-success btn-sm mt-1" data-limit="{{.MaxSlashSubcommands}}"><i class="fas fa-plus"></i> Add Subcommand</button>
                                         <div id="slash-subcommand-limit-msg" class="hidden mt-1">
                                             {{if .IsGuildPremium}}
-                                            <small class="form-text text-muted">You've reached the maximum of 10 subcommands.</small>
+                                            <small class="form-text text-muted">You've reached the maximum of {{.MaxSlashSubcommands}} subcommands.</small>
                                             {{else}}
-                                            {{template "cp_premium_nudge" (dict "IsGuildPremium" .IsGuildPremium "Title" "You've reached the free limit of 3 subcommands. Premium servers can have up to 10.")}}
+                                            {{template "cp_premium_nudge" (dict "IsGuildPremium" .IsGuildPremium "Title" (printf "You've reached the free limit of %d subcommands. Premium servers can have up to %d." .MaxSlashSubcommands .MaxSlashSubcommandsPremium))}}
                                             {{end}}
                                         </div>
                                     </div>
@@ -543,86 +544,7 @@
                                     </div>
                                 </template>
                                 <template id="slash-option-template">
-                                    <div class="slash-option-row mb-3">
-                                        <div class="form-row align-items-end">
-                                            <div class="col-12 col-md-3 mb-2 mb-md-0">
-                                                <label class="small mb-1">Name</label>
-                                                <input type="text" class="form-control" data-slash-field="name" maxlength="32" placeholder="name">
-                                            </div>
-                                            <div class="col-12 col-md-2 mb-2 mb-md-0">
-                                                <label class="small mb-1">Type</label>
-                                                <select class="form-control slash-option-type-select" data-slash-field="type" onchange="slashOptTypeChanged(this)">
-                                                    <option value="string">Text</option>
-                                                    <option value="string_menu">Text menu (choices)</option>
-                                                    <option value="integer">Integer</option>
-                                                    <option value="integer_menu">Integer menu (choices)</option>
-                                                    <option value="number">Number</option>
-                                                    <option value="number_menu">Number menu (choices)</option>
-                                                    <option value="boolean">True/False</option>
-                                                    <option value="user">User</option>
-                                                    <option value="channel">Channel</option>
-                                                    <option value="role">Role</option>
-                                                    <option value="mentionable">Mentionable</option>
-                                                </select>
-                                            </div>
-                                            <div class="col-12 col-md-4 mb-2 mb-md-0">
-                                                <label class="small mb-1">Description</label>
-                                                <input type="text" class="form-control" data-slash-field="description" maxlength="100" placeholder="description">
-                                            </div>
-                                            <div class="col-6 col-md-2 mb-2 mb-md-0">
-                                                <div class="form-group d-flex align-items-center">
-                                                    <input type="checkbox" class="tgl tgl-flat" data-slash-field="required">
-                                                    <label class="tgl-btn mb-2"></label>
-                                                    <span class="tgl-desc ml-2 mb-2">Required</span>
-                                                </div>
-                                            </div>
-                                            <div class="col-6 col-md-1 text-right">
-                                                <button type="button" class="btn btn-danger btn-sm slash-option-remove" title="Remove argument"><i class="fas fa-minus"></i></button>
-                                            </div>
-                                        </div>
-                                        <div class="form-row slash-opt-extra-choices mt-2 hidden">
-                                            <div class="col-12">
-                                                <label class="small mb-1">Choices - one per line (max 25). For Integer/Number arguments each line must be a number.</label>
-                                                <textarea class="form-control" data-slash-field="choices" rows="3" placeholder="One choice per line"></textarea>
-                                            </div>
-                                        </div>
-                                        <div class="form-row slash-opt-extra-text mt-2">
-                                            <div class="col-6 col-md-3 mb-2 mb-md-0">
-                                                <label class="small mb-1">Min length</label>
-                                                <input type="number" min="0" class="form-control" data-slash-field="min_length">
-                                            </div>
-                                            <div class="col-6 col-md-3 mb-2 mb-md-0">
-                                                <label class="small mb-1">Max length</label>
-                                                <input type="number" min="0" class="form-control" data-slash-field="max_length">
-                                            </div>
-                                        </div>
-                                        <div class="form-row slash-opt-extra-number mt-2 hidden">
-                                            <div class="col-6 col-md-3 mb-2 mb-md-0">
-                                                <label class="small mb-1">Min value</label>
-                                                <input type="number" step="any" class="form-control" data-slash-field="min_value">
-                                            </div>
-                                            <div class="col-6 col-md-3 mb-2 mb-md-0">
-                                                <label class="small mb-1">Max value</label>
-                                                <input type="number" step="any" class="form-control" data-slash-field="max_value">
-                                            </div>
-                                        </div>
-                                        <div class="form-row slash-opt-extra-channel mt-2 hidden">
-                                            <div class="col-12">
-                                                <label class="small mb-1 d-block">Allowed channel types (leave empty to allow any)</label>
-                                                <select class="multiselect form-control" multiple="multiple" data-plugin-multiselect data-slash-field="channel_types">
-                                                    <option value="0">Text</option>
-                                                    <option value="2">Voice</option>
-                                                    <option value="4">Category</option>
-                                                    <option value="5">Announcement</option>
-                                                    <option value="13">Stage</option>
-                                                    <option value="15">Forum</option>
-                                                    <option value="11">Public Thread</option>
-                                                    <option value="12">Private Thread</option>
-                                                    <option value="10">Announcement Thread</option>
-                                                </select>
-                                            </div>
-                                        </div>
-                                    </div>
+                                    {{template "slashOptionRow" (dict "Prefix" "" "ReqID" "" "Opt" .NewSlashOption)}}
                                 </template>
                             </div>
                             <div id="cc-time-trigger-details" class="hidden col-lg-8">
@@ -1237,6 +1159,8 @@
             }
         });
 
+        slashSyncMoveButtons(rows);
+
         const count = document.getElementById('slash-options-count');
         if (count) count.textContent = rows.length;
 
@@ -1297,6 +1221,38 @@
         validateSlashUI();
     });
 
+    function slashSyncMoveButtons(rows) {
+        rows.forEach((row, i) => {
+            const up = row.querySelector('.slash-option-move-up');
+            const down = row.querySelector('.slash-option-move-down');
+            if (up) up.disabled = i === 0;
+            if (down) down.disabled = i === rows.length - 1;
+        });
+    }
+
+    function slashMoveOptionRow(btn, dir) {
+        const row = btn.closest('.slash-option-row');
+        if (!row) return;
+        if (dir < 0) {
+            const prev = row.previousElementSibling;
+            if (prev && prev.classList.contains('slash-option-row')) row.parentNode.insertBefore(row, prev);
+        } else {
+            const next = row.nextElementSibling;
+            if (next && next.classList.contains('slash-option-row')) row.parentNode.insertBefore(next, row);
+        }
+        if (row.closest('#slash-subcommands-list')) {
+            slashRenumberSubcommands();
+        } else {
+            renumberSlashOptions();
+        }
+        validateSlashUI();
+    }
+
+    $('#slash-options-list, #slash-subcommands-list').on('click', '.slash-option-move-up, .slash-option-move-down', function (e) {
+        e.preventDefault();
+        slashMoveOptionRow(this, $(this).hasClass('slash-option-move-up') ? -1 : 1);
+    });
+
     // Ensure field names/ids are consistent on initial load too.
     renumberSlashOptions();
 
@@ -1315,8 +1271,8 @@
 
     function slashSubcommandLimit() {
         const btn = document.getElementById('slash-subcommand-add');
-        const n = btn ? parseInt(btn.getAttribute('data-limit'), 10) : 3;
-        return isNaN(n) ? 3 : n;
+        const n = btn ? parseInt(btn.getAttribute('data-limit'), 10) : 10;
+        return isNaN(n) ? 10 : n;
     }
 
     // Reassigns field names for every subcommand and its option rows as a 2-level indexed
@@ -1359,6 +1315,7 @@
                     lbl.htmlFor = id;
                 }
             });
+            slashSyncMoveButtons(rows);
             const optCount = card.querySelector('.slash-subcommand-optcount');
             if (optCount) optCount.textContent = rows.length;
             const optAtMax = rows.length >= 25;
@@ -1455,7 +1412,7 @@
 
     // Client-side validation mirroring the server rules in validateSlashCommandData.
     // Discord's name pattern (lowercased). \p{L}\p{N} need the unicode flag.
-    const SLASH_NAME_RE = /^[-_\p{L}\p{N}]{1,32}$/u;
+    var SLASH_NAME_RE = /^[-_\p{L}\p{N}]{1,32}$/u;
 
     function slashEscapeHtml(s) {
         return String(s).replace(/[&<>"']/g, function (c) {
@@ -1700,6 +1657,7 @@
 		    return true;
         });
 </script>
+{{end}}
 
 {{template "cp_footer" .}}
 

@@ -18,12 +18,11 @@ var Command = &commands.YAGCommand{
 	Name:                 "cleardm",
 	Description:          "clears the DM chat with a user, bot owner only command.",
 	Aliases:              []string{"cleardms", "cleandm", "cleandms"},
-	HideFromHelp:         true,
 	RequiredArgs:         1,
 	Arguments: []*dcmd.ArgDef{
 		{Name: "Target", Type: dcmd.User},
 	},
-	RunFunc: util.RequireOwner(func(data *dcmd.Data) (interface{}, error) {
+	RunFunc: util.RequireOwner(func(data *dcmd.Data) (any, error) {
 		var target = data.Args[0].Value.(*discordgo.User)
 		dm, err := common.BotSession.UserChannelCreate(target.ID)
 		if err != nil {
